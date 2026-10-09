@@ -1,0 +1,54 @@
+name: Build MoltenVK for iOS
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - name: Checkout ShadiOS
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          xcodebuild -version
+
+      - name: Configure MoltenVK
+        run: |
+          cmake -S externals/MoltenVK -B build-moltenvk-ios -G Xcode \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_SYSROOT=iphoneos \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=17.0 \
+            -DMVK_BUILD_SHADER_CONVERTER_TOOL=OFF \
+            -DMVK_EXCLUDE_SPIRV_TOOLS=ON \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build MoltenVK
+        run: |
+          cmake --build build-moltenvk-ios \
+            --config Release \
+            --target MoltenVK
+
+      - name: Package framework
+        run: |
+          FRAMEWORK="$(find build-moltenvk-ios -type d -name MoltenVK.framework -print -quit)"
+          test -n "$FRAMEWORK" || {
+            echo "MoltenVK.framework was not generated"
+            exit 1
+          }
+          mkdir -p artifacts
+          ditto -c -k --sequesterRsrc "$FRAMEWORK" artifacts/MoltenVK-iOS.zip
+
+      - name: Upload iOS framework
+        uses: actions/upload-artifact@v4
+        with:
+          name: MoltenVK-iOS-arm64
+          path: artifacts/MoltenVK-iOS.zip
+          if-no-files-found: error
+          retention-days: 14
