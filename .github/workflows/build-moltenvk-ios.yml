@@ -55,6 +55,20 @@ jobs:
           PATCH
           grep -n -C 3 APPKIT_LIBRARY externals/MoltenVK/Common/CMakeLists.txt
 
+      - name: Disable shader converter for iOS
+        run: |
+          python3 - <<'PATCH'
+          from pathlib import Path
+          p = Path("externals/MoltenVK/CMakeLists.txt")
+          s = p.read_text()
+          old = 'add_subdirectory("MoltenVKShaderConverter/MoltenVKShaderConverter")'
+          if old not in s:
+              raise SystemExit("Expected shader converter line not found")
+          s = s.replace(old, 'if(MVK_BUILD_SHADER_CONVERTER_TOOL)\n    ' + old + '\nendif()', 1)
+          p.write_text(s)
+          PATCH
+          sed -n '96,115p' externals/MoltenVK/CMakeLists.txt
+
       - name: Configure MoltenVK
         run: |
           cmake -S externals/MoltenVK -B build-moltenvk-ios -G Xcode \
