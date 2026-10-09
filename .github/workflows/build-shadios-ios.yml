@@ -29,8 +29,8 @@ jobs:
       - name: Apply ShadiOS iOS patch
         working-directory: ShadiOS/upstream-shadPS4
         run: |
-          git apply --check ../shadios-ios-changes.patch
-          git apply ../shadios-ios-changes.patch
+          git apply --check ../../ShadiOS/shadios-ios-changes.patch
+          git apply ../../ShadiOS/shadios-ios-changes.patch
 
       - name: Verify iOS source
         working-directory: ShadiOS/upstream-shadPS4
