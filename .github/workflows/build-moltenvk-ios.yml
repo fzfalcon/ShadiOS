@@ -27,6 +27,19 @@ jobs:
       - name: Prepare build cache
         run: mkdir -p "$HOME/.cache/CPM"
 
+      - name: Patch MoltenVK for iOS
+        run: |
+          python3 - <<'PATCH'
+          from pathlib import Path
+          p = Path("externals/MoltenVK/Common/CMakeLists.txt")
+          s = p.read_text()
+          s = s.replace(
+              'find_library(APPKIT_LIBRARY AppKit)',
+              'if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")\n    find_library(APPKIT_LIBRARY AppKit)\nendif()'
+          )
+          p.write_text(s)
+          PATCH
+
       - name: Configure MoltenVK
         run: |
           cmake -S externals/MoltenVK -B build-moltenvk-ios -G Xcode \
