@@ -51,79 +51,23 @@ jobs:
           test -f externals/MoltenVK/Common/CMakeLists.txt
           test -f externals/MoltenVK/CMakeLists.txt
 
-      - name: Patch MoltenVK for iOS
+      - name: Verify MoltenVK AppKit guard
         working-directory: ShadiOS/upstream-shadPS4
         run: |
           python3 - <<'PY'
           from pathlib import Path
 
           p = Path("externals/MoltenVK/Common/CMakeLists.txt")
-          lines = p.read_text().splitlines()
-
-          commands = (
-              "find_library(APPKIT_LIBRARY AppKit REQUIRED)",
-              "target_link_libraries(MoltenVK_Common PUBLIC ${APPKIT_LIBRARY})",
-          )
-
-          for command in commands:
-              matches = [
-                  i for i, line in enumerate(lines)
-                  if command in line
-              ]
-
-              if not matches:
-                  raise SystemExit(f"Required AppKit command not found: {command}")
-
-              for i in reversed(matches):
-                  line = lines[i]
-
-                  # Do not wrap a command that is already inside an iOS guard.
-                  previous = "\n".join(lines[max(0, i - 4):i])
-                  if 'if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")' in previous:
-                      continue
-
-                  indent = line[:len(line) - len(line.lstrip())]
-                  lines[i:i + 1] = [
-                      indent + 'if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")',
-                      indent + "    " + line.strip(),
-                      indent + "endif()",
-                  ]
-
-          p.write_text("\n".join(lines) + "\n")
-          print("AppKit commands guarded for iOS.")
-
-          # Verify both commands are now inside non-iOS guards.
-          text = p.read_text()
-          for command in commands:
-              if command not in text:
-                  raise SystemExit(f"Verification failed: {command}")
-
-          PY
-
-          python3 - <<'PY'
-          from pathlib import Path
-
-          p = Path("externals/MoltenVK/CMakeLists.txt")
           s = p.read_text()
-          marker = 'add_subdirectory("MoltenVK")'
 
-          if marker not in s:
-              raise SystemExit("MoltenVK target declaration not found")
+          expected = 'if (CMAKE_SYSTEM_NAME STREQUAL "Darwin")'
+          appkit = "find_library(APPKIT_LIBRARY AppKit REQUIRED)"
 
-          if "framework UIKit" not in s:
-              addition = (
-                  marker + "\n"
-                  'if(CMAKE_SYSTEM_NAME STREQUAL "iOS")\n'
-                  '    target_link_libraries(MoltenVK PRIVATE "-framework UIKit" "-framework CoreGraphics")\n'
-                  "endif()"
-              )
-              s = s.replace(marker, addition, 1)
-              p.write_text(s)
+          if expected not in s or appkit not in s:
+              raise SystemExit("Expected existing Darwin AppKit guard was not found")
 
-          print("MoltenVK framework configuration verified.")
+          print("AppKit lookup is guarded for Darwin; no source rewrite needed.")
           PY
-
-          grep -n -C 3 'APPKIT_LIBRARY' externals/MoltenVK/Common/CMakeLists.txt
 
       - name: Configure iOS ARM64
         working-directory: ShadiOS/upstream-shadPS4
