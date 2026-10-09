@@ -73,7 +73,7 @@ jobs:
       - name: Package MoltenVK build output
         run: |
           mkdir -p artifacts
-          find build-moltenvk-ios -type f \\( -name "libMoltenVK*.dylib" -o -name "libMoltenVK*.a" \\) -print
+          find build-moltenvk-ios -type f -name "libMoltenVK*" -print
           cp -R build-moltenvk-ios/MoltenVK/Release-iphoneos artifacts/MoltenVK-build
           ditto -c -k --sequesterRsrc artifacts/MoltenVK-build artifacts/MoltenVK-iOS.zip
 
