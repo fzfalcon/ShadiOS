@@ -55,31 +55,40 @@ jobs:
         run: |
           python3 - <<'PY_APPKIT'
           from pathlib import Path
-          import re
 
           p = Path("externals/MoltenVK/Common/CMakeLists.txt")
-          s = p.read_text()
+          lines = p.read_text().splitlines()
+          text = "\n".join(lines)
 
-          pattern = re.compile(
-              r"(?m)^([ \t]*)find_library\(APPKIT_LIBRARY AppKit REQUIRED\)\n"
-              r"\1target_link_libraries\(MoltenVK_Common PUBLIC \$\{APPKIT_LIBRARY\}\)[ \t]*$"
-          )
-
-          if "find_library(APPKIT_LIBRARY AppKit REQUIRED)" not in s:
-              raise SystemExit("AppKit block not found")
-
-          if 'if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")' not in s:
-              replacement = (
-                  r'\1if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")' + "\n"
-                  r'\1    find_library(APPKIT_LIBRARY AppKit REQUIRED)' + "\n"
-                  r'\1    target_link_libraries(MoltenVK_Common PUBLIC ${APPKIT_LIBRARY})' + "\n"
-                  r'\1endif()'
+          guard = 'if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")'
+          if guard not in text:
+              start = next(
+                  (i for i, line in enumerate(lines)
+                   if "find_library(APPKIT_LIBRARY AppKit REQUIRED)" in line),
+                  None
               )
-              s, count = pattern.subn(replacement, s, count=1)
-              if count != 1:
-                  raise SystemExit("Could not safely patch the AppKit block")
+              if start is None:
+                  raise SystemExit("AppKit find_library line not found")
 
-          p.write_text(s)
+              end = next(
+                  (i for i in range(start + 1, min(start + 8, len(lines)))
+                   if "target_link_libraries(MoltenVK_Common PUBLIC ${APPKIT_LIBRARY})"
+                   in lines[i]),
+                  None
+              )
+              if end is None:
+                  raise SystemExit("AppKit target_link_libraries line not found")
+
+              indent = lines[start][:len(lines[start]) - len(lines[start].lstrip())]
+              lines[start:end + 1] = [
+                  indent + guard,
+                  indent + "    " + lines[start].strip(),
+                  indent + "    " + lines[end].strip(),
+                  indent + "endif()",
+              ]
+              p.write_text("\n".join(lines) + "\n")
+
+          print("AppKit iOS guard verified.")
           PY_APPKIT
 
           python3 - <<'PY_FRAMEWORK'
@@ -100,8 +109,9 @@ jobs:
                   "endif()"
               )
               s = s.replace(marker, addition, 1)
+              p.write_text(s)
 
-          p.write_text(s)
+          print("MoltenVK iOS framework patch verified.")
           PY_FRAMEWORK
 
           grep -n -C 3 APPKIT_LIBRARY externals/MoltenVK/Common/CMakeLists.txt
