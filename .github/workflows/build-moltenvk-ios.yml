@@ -29,60 +29,23 @@ jobs:
 
       - name: Patch MoltenVK for iOS
         run: |
+          git -C externals/MoltenVK checkout -- Common/CMakeLists.txt
           python3 - <<'PATCH'
           from pathlib import Path
-
           p = Path("externals/MoltenVK/Common/CMakeLists.txt")
-          lines = p.read_text().splitlines()
-          result = []
-          patched = False
-
-          for line in lines:
-              if "find_library(APPKIT_LIBRARY" in line:
-                  indent = line[:len(line) - len(line.lstrip())]
-                  result.append(indent + 'if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")')
-                  result.append("    " + line)
-                  result.append(indent + "endif()")
-                  patched = True
-              else:
-                  result.append(line)
-
-          if not patched:
-              raise SystemExit("AppKit lookup not found; stopping safely.")
-
-          p.write_text("\\n".join(result) + "\\n")
-          print("AppKit lookup patched.")
-          PATCH
-          grep -n -C 3 APPKIT_LIBRARY externals/MoltenVK/Common/CMakeLists.txt
-
-      - name: Disable shader converter for iOS
-        run: |
-          python3 - <<'PATCH'
-          from pathlib import Path
-          p = Path("externals/MoltenVK/CMakeLists.txt")
           s = p.read_text()
-          old = 'add_subdirectory("MoltenVKShaderConverter/MoltenVKShaderConverter")'
+          old = "find_library(APPKIT_LIBRARY AppKit REQUIRED)"
           if old not in s:
-              raise SystemExit("Expected shader converter line not found")
-          s = s.replace(old, 'if(MVK_BUILD_SHADER_CONVERTER_TOOL)\n    ' + old + '\nendif()', 1)
+              raise SystemExit("Expected upstream AppKit line not found")
+          s = s.replace(
+              old,
+              'if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")\n    ' + old + '\nendif()',
+              1
+          )
           p.write_text(s)
+          print("AppKit patch applied; upstream file formatting preserved.")
           PATCH
-          sed -n '96,115p' externals/MoltenVK/CMakeLists.txt
-
-      - name: Patch MoltenVK target dependencies
-        run: |
-          python3 - <<'PATCH'
-          from pathlib import Path
-          p = Path("externals/MoltenVK/MoltenVK/CMakeLists.txt")
-          s = p.read_text()
-          old = '    MoltenVK::ShaderConverter'
-          if old not in s:
-              raise SystemExit("ShaderConverter link not found; stopping safely.")
-          s = s.replace(old, '    $<$<BOOL:${MVK_BUILD_SHADER_CONVERTER_TOOL}>:MoltenVK::ShaderConverter>', 1)
-          p.write_text(s)
-          print("Patched ShaderConverter link.")
-          PATCH
-          grep -n -C 3 ShaderConverter externals/MoltenVK/MoltenVK/CMakeLists.txt
+          grep -n -C 2 APPKIT_LIBRARY externals/MoltenVK/Common/CMakeLists.txt
 
       - name: Configure MoltenVK
         run: |
