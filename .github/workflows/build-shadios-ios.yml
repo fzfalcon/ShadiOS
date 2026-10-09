@@ -1,22 +1,83 @@
+ 
 name: Build ShadiOS iOS
 
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
-  inspect:
+  build:
     runs-on: macos-15
+    timeout-minutes: 120
+
     steps:
       - name: Checkout ShadiOS
         uses: actions/checkout@v4
+        with:
+          path: ShadiOS
 
-      - name: Checkout AetherPS4 reference
+      - name: Checkout shadPS4 source
         uses: actions/checkout@v4
         with:
-          repository: Leviidev/AetherPS4
-          path: reference-AetherPS4
+          repository: fzfalcon/shadPS4
+          path: ShadiOS/upstream-shadPS4
+          submodules: recursive
 
-      - name: Inspect Xcode project
+      - name: Verify iOS target
+        working-directory: ShadiOS/upstream-shadPS4
         run: |
-          xcodebuild -list \
-            -project reference-AetherPS4/AetherPS4-iOS/AetherPS4-iOS.xcodeproj
+          grep -n -A15 'if(CMAKE_SYSTEM_NAME STREQUAL "iOS")' CMakeLists.txt
+          test -f src/platform/ios/shadps4_ios_api.cpp
+
+      - name: Install build tools
+        run: |
+          brew install cmake ninja pkg-config
+
+      - name: Configure iOS ARM64
+        working-directory: ShadiOS/upstream-shadPS4
+        run: |
+          cmake -S . -B build-shadios-ios -G Ninja \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_SYSROOT=iphoneos \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=17.0 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DENABLE_TESTS=OFF
+
+      - name: Build static emulator library
+        working-directory: ShadiOS/upstream-shadPS4
+        run: |
+          cmake --build build-shadios-ios \
+            --target shadps4 --parallel 3
+
+      - name: Package build output
+        if: success()
+        working-directory: ShadiOS/upstream-shadPS4
+        run: |
+          mkdir -p ../shadios-artifact
+          find build-shadios-ios -type f -name 'libshadps4.a' \
+            -exec cp {} ../shadios-artifact/ \;
+          test -f ../shadios-artifact/libshadps4.a
+          xcrun lipo -info ../shadios-artifact/libshadps4.a
+          cp build-shadios-ios/CMakeCache.txt ../shadios-artifact/
+
+      - name: Upload build artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ShadiOS-iOS-arm64-library
+          path: ShadiOS/shadios-artifact/
+          if-no-files-found: error
+
+      - name: Upload configure/build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ShadiOS-build-diagnostics
+          path: |
+            ShadiOS/upstream-shadPS4/build-shadios-ios/CMakeFiles/CMakeConfigureLog.yaml
+            ShadiOS/upstream-shadPS4/build-shadios-ios/CMakeCache.txt
+          if-no-files-found: ignore
+
