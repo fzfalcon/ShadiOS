@@ -33,12 +33,20 @@ jobs:
           from pathlib import Path
           p = Path("externals/MoltenVK/Common/CMakeLists.txt")
           s = p.read_text()
-          s = s.replace(
-              'find_library(APPKIT_LIBRARY AppKit)',
-              'if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")\n    find_library(APPKIT_LIBRARY AppKit)\nendif()'
-          )
+          old = "find_library(APPKIT_LIBRARY AppKit)"
+          if old not in s:
+              old = "find_library(APPKIT_LIBRARY AppKit REQUIRED)"
+          if old not in s:
+              print("AppKit lookup context:")
+              for i, line in enumerate(s.splitlines(), 1):
+                  if "APPKIT_LIBRARY" in line or "find_library" in line:
+                      print(f"{i}: {line}")
+              raise SystemExit("AppKit lookup not matched; stopping.")
+          s = s.replace(old, 'if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")\\n    ' + old + '\\nendif()', 1)
           p.write_text(s)
+          print("Patched AppKit lookup for iOS.")
           PATCH
+          grep -n -C 3 APPKIT_LIBRARY externals/MoltenVK/Common/CMakeLists.txt
 
       - name: Configure MoltenVK
         run: |
