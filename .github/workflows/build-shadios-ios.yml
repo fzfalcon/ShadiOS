@@ -10,6 +10,12 @@ jobs:
       - name: Checkout ShadiOS
         uses: actions/checkout@v4
 
+      - name: Checkout AetherPS4 reference
+        uses: actions/checkout@v4
+        with:
+          repository: Leviidev/AetherPS4
+          path: reference-AetherPS4
+
       - name: Inspect Xcode project
         run: |
           xcodebuild -list \
