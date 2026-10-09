@@ -18,6 +18,12 @@ jobs:
           sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
           xcodebuild -version
 
+      - name: Fetch MoltenVK source
+        run: |
+          git clone https://github.com/shadPS4-emu/ext-MoltenVK.git externals/MoltenVK
+          cd externals/MoltenVK
+          git checkout a14cbf433414aa95da7046694b069f0f3f9263a5
+
       - name: Configure MoltenVK
         run: |
           cmake -S externals/MoltenVK -B build-moltenvk-ios -G Xcode \
