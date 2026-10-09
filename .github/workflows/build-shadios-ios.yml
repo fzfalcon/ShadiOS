@@ -18,19 +18,13 @@ jobs:
         with:
           path: ShadiOS
 
-      - name: Checkout official shadPS4
+      - name: Checkout iOS port source
         uses: actions/checkout@v4
         with:
-          repository: shadps4-emu/shadPS4
-          ref: c7e065d1b415be16c23e260a21f1dd8bbfc4cb57
+          repository: fzfalcon/shadPS4
+          ref: shadios-ios-port
           path: ShadiOS/upstream-shadPS4
           submodules: recursive
-
-      - name: Apply ShadiOS iOS patch
-        working-directory: ShadiOS/upstream-shadPS4
-        run: |
-          git apply --check ../../ShadiOS/shadios-ios-changes.patch
-          git apply ../../ShadiOS/shadios-ios-changes.patch
 
       - name: Verify iOS source
         working-directory: ShadiOS/upstream-shadPS4
