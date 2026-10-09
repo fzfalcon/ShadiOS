@@ -1,223 +1,4 @@
 
-name: Build ShadiOS iOS
-
-on:
-  workflow_dispatch:
-
-permissions:
-  contents: read
-
-concurrency:
-  group: shadios-ios-build
-  cancel-in-progress: false
-
-jobs:
-  build:
-    name: Build ShadiOS ARM64
-    runs-on: macos-15
-    timeout-minutes: 360
-
-    steps:
-      - name: Checkout ShadiOS
-        uses: actions/checkout@v4
-        with:
-          path: ShadiOS
-          persist-credentials: false
-
-      - name: Checkout official shadPS4
-        uses: actions/checkout@v4
-        with:
-          repository: shadps4-emu/shadPS4
-          ref: c7e065d1b415be16c23e260a21f1dd8bbfc4cb57
-          path: ShadiOS/upstream-shadPS4
-          submodules: recursive
-          persist-credentials: false
-
-      - name: Apply ShadiOS iOS patch
-        working-directory: ShadiOS/upstream-shadPS4
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -f ../shadios-ios-changes.patch
-          git apply --check ../shadios-ios-changes.patch
-          git apply ../shadios-ios-changes.patch
-
-      - name: Verify iOS source
-        working-directory: ShadiOS/upstream-shadPS4
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -f src/platform/ios/shadps4_ios_api.cpp
-          grep -n -A15 'if(CMAKE_SYSTEM_NAME STREQUAL "iOS")' CMakeLists.txt
-          git diff --check
-
-      - name: Install build tools
-        shell: bash
-        run: |
-          set -euo pipefail
-          brew install cmake ninja pkg-config
-
-      - name: Fetch MoltenVK dependency
-        working-directory: ShadiOS/upstream-shadPS4
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ ! -d externals/MoltenVK/.git ]; then
-            git clone https://github.com/shadPS4-emu/ext-MoltenVK.git externals/MoltenVK
-          fi
-          git -C externals/MoltenVK checkout a14cbf433414aa95da7046694b069f0f3f9263a5
-          git -C externals/MoltenVK submodule update --init --recursive
-
-      - name: Patch MoltenVK platform frameworks
-        working-directory: ShadiOS/upstream-shadPS4
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
-
-          common = Path("externals/MoltenVK/Common/CMakeLists.txt")
-          text = common.read_text()
-
-          # Remove the original AppKit and IOKit lookup/link statements.
-          text = re.sub(
-              r'^[ \t]*find_library\((?:APPKIT|IOKIT)_LIBRARY[^\n]*\n',
-              '',
-              text,
-              flags=re.MULTILINE,
-          )
-          text = re.sub(
-              r'^[ \t]*target_link_libraries\(MoltenVK_Common PUBLIC \$\{(?:APPKIT|IOKIT)_LIBRARY\}\)[^\n]*\n',
-              '',
-              text,
-              flags=re.MULTILINE,
-          )
-
-          # Add framework lookups only for the macOS target.
-          if "SHADIOS_PLATFORM_FRAMEWORKS" not in text:
-              text += """
-          # SHADIOS_PLATFORM_FRAMEWORKS
-          if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
-              find_library(APPKIT_LIBRARY AppKit REQUIRED)
-              find_library(IOKIT_LIBRARY IOKit REQUIRED)
-              target_link_libraries(MoltenVK_Common PUBLIC
-                  ${APPKIT_LIBRARY}
-                  ${IOKIT_LIBRARY}
-              )
-          endif()
-          """
-          common.write_text(text)
-
-          # Link iOS frameworks from the top-level MoltenVK CMake project.
-          root = Path("externals/MoltenVK/CMakeLists.txt")
-          text = root.read_text()
-
-          if "SHADIOS_IOS_FRAMEWORKS" not in text:
-              marker = 'add_subdirectory("MoltenVK")'
-              if marker not in text:
-                  raise SystemExit(
-                      "Could not find add_subdirectory(\"MoltenVK\") "
-                      "in externals/MoltenVK/CMakeLists.txt"
-                  )
-
-              replacement = marker + """
-          
-          # SHADIOS_IOS_FRAMEWORKS
-          if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
-              find_library(UIKIT_FRAMEWORK UIKit REQUIRED)
-              find_library(COREGRAPHICS_FRAMEWORK CoreGraphics REQUIRED)
-              target_link_libraries(MoltenVK PUBLIC
-                  ${UIKIT_FRAMEWORK}
-                  ${COREGRAPHICS_FRAMEWORK}
-              )
-          endif()
-          """
-              text = text.replace(marker, replacement, 1)
-
-          root.write_text(text)
-          print("MoltenVK framework patch applied.")
-          PY
-
-      - name: Build native macOS font generator
-        working-directory: ShadiOS/upstream-shadPS4
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p host-tools
-          clang++ -std=c++17 \
-            externals/imgui/misc/fonts/binary_to_compressed_c.cpp \
-            -o host-tools/Dear_ImGui_FontEmbed
-          test -x host-tools/Dear_ImGui_FontEmbed
-
-      - name: Configure host font generator for cross-compilation
-        working-directory: ShadiOS/upstream-shadPS4
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
-
-          path = Path("src/imgui/renderer/CMakeLists.txt")
-          if not path.exists():
-              raise SystemExit(f"Missing expected file: {path}")
-
-          text = path.read_text()
-
-          if "HOST_FONT_EMBED_EXECUTABLE" in text:
-              print("Host font generator configuration already present.")
-              raise SystemExit(0)
-
-          target_pattern = re.compile(
-              r'add_executable\(Dear_ImGui_FontEmbed\s+'
-              r'\$\{CMAKE_SOURCE_DIR\}/externals/imgui/misc/fonts/'
-              r'binary_to_compressed_c\.cpp\)'
-          )
-
-          text, count = target_pattern.subn(
-              """if(CMAKE_CROSSCOMPILING AND HOST_FONT_EMBED_EXECUTABLE)
-              add_executable(Dear_ImGui_FontEmbed IMPORTED GLOBAL)
-              set_target_properties(Dear_ImGui_FontEmbed PROPERTIES
-                  IMPORTED_LOCATION "${HOST_FONT_EMBED_EXECUTABLE}")
-          else()
-              add_executable(Dear_ImGui_FontEmbed
-                  ${CMAKE_SOURCE_DIR}/externals/imgui/misc/fonts/binary_to_compressed_c.cpp)
-          endif()""",
-              text,
-              count=1,
-          )
-
-          if count != 1:
-              raise SystemExit(
-                  "Could not locate the expected Dear_ImGui_FontEmbed "
-                  "target declaration; refusing to edit the file."
-              )
-
-          text = re.sub(
-              r'COMMAND\s+\$<TARGET_FILE:Dear_ImGui_FontEmbed>',
-              'COMMAND ${FONT_EMBED_COMMAND}',
-              text,
-              count=1,
-          )
-
-          if "set(FONT_EMBED_COMMAND" not in text:
-              insert = """
-          if(CMAKE_CROSSCOMPILING AND HOST_FONT_EMBED_EXECUTABLE)
-              set(FONT_EMBED_COMMAND "${HOST_FONT_EMBED_EXECUTABLE}")
-          else()
-              set(FONT_EMBED_COMMAND "$<TARGET_FILE:Dear_ImGui_FontEmbed>")
-          endif()
-          """
-              match = re.search(r'add_executable\(Dear_ImGui_FontEmbed.*?\nendif\(\)', text, re.DOTALL)
-              if not match:
-                  raise SystemExit("Could not locate font-generator target block.")
-              text = text[:match.end()] + "\n" + insert + text[match.end():]
-
-          path.write_text(text)
-          print("Host font generator configured.")
-          PY
-
       - name: Patch ImGuiFileDialog for iOS
         working-directory: ShadiOS/upstream-shadPS4
         shell: bash
@@ -229,120 +10,43 @@ jobs:
           path = Path("externals/ImGuiFileDialog/ImGuiFileDialog.cpp")
           text = path.read_text()
 
-          old = "const int dir_err = std::system(buffer);"
-          new = """#if defined(__APPLE__)
-                  // iOS does not provide std::system(). Directory creation
-                  // through a shell is unavailable in the iOS sandbox.
-                  const int dir_err = 0;
-          #else
-                  const int dir_err = std::system(buffer);
-          #endif"""
+          marker = "SHADIOS_IOS_SYSTEM_PATCH"
 
-          if new in text:
+          if marker in text:
               print("ImGuiFileDialog iOS patch already applied.")
-          else:
-              count = text.count(old)
-              if count != 1:
-                  raise SystemExit(
-                      f"Expected exactly one std::system(buffer) call, found {count}. "
-                      "Inspect ImGuiFileDialog.cpp before changing it."
-                  )
-              text = text.replace(old, new, 1)
-              path.write_text(text)
-              print("ImGuiFileDialog iOS patch applied.")
-
-          if "const int dir_err = std::system(buffer);" not in path.read_text():
-              raise SystemExit("The original non-iOS system() call was unexpectedly removed.")
-          PY
-
-      - name: Enable Objective-C languages for iOS
-        working-directory: ShadiOS/upstream-shadPS4
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
-
-          path = Path("CMakeLists.txt")
-          text = path.read_text()
-
-          if "enable_language(OBJCXX)" in text:
-              print("Objective-C++ language already enabled.")
               raise SystemExit(0)
 
-          match = re.search(r'\bproject\s*\([^)]*\)', text, re.IGNORECASE)
-          if not match:
-              raise SystemExit("Could not locate root project() command.")
+          old = "std::system(buffer);"
+          count = text.count(old)
 
-          insertion = match.group(0) + """
+          if count != 2:
+              raise SystemExit(
+                  f"Expected 2 std::system(buffer) calls, found {count}. "
+                  "Source differs from the log; stopping safely."
+              )
 
-          if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
-              enable_language(OBJC)
-              enable_language(OBJCXX)
-          endif()
-          """
+          replacement = """\
+          #if defined(__APPLE__)
+                  -1  // Shell commands are unavailable on iOS.
+          #else
+                  std::system(buffer)
+          #endif"""
 
-          text = text[:match.start()] + insertion + text[match.end():]
+          # Replace both calls while preserving each surrounding expression.
+          text = text.replace(
+              old,
+              """/* SHADIOS_IOS_SYSTEM_PATCH */
+          #if defined(__APPLE__)
+                  -1
+          #else
+                  std::system(buffer)
+          #endif""",
+          )
+
           path.write_text(text)
-          print("Objective-C and Objective-C++ enabled for iOS.")
+
+          if text.count(marker) != 2:
+              raise SystemExit("Verification failed: expected both patched calls.")
+
+          print("Both ImGuiFileDialog system() calls patched.")
           PY
-
-      - name: Configure iOS ARM64
-        working-directory: ShadiOS/upstream-shadPS4
-        shell: bash
-        run: |
-          set -euo pipefail
-          cmake -S . -B build-shadios-ios -G Ninja \
-            -DCMAKE_SYSTEM_NAME=iOS \
-            -DCMAKE_OSX_SYSROOT=iphoneos \
-            -DCMAKE_OSX_ARCHITECTURES=arm64 \
-            -DCMAKE_OSX_DEPLOYMENT_TARGET=17.0 \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DENABLE_TESTS=OFF \
-            -DALLOWS_ONESHOT_TIMERS_WITH_TIMEOUT_ZERO_EXITCODE=0 \
-            -DHOST_FONT_EMBED_EXECUTABLE="${PWD}/host-tools/Dear_ImGui_FontEmbed"
-
-      - name: Build emulator library
-        working-directory: ShadiOS/upstream-shadPS4
-        shell: bash
-        run: |
-          set -euo pipefail
-          cmake --build build-shadios-ios --target shadps4 --parallel 1
-
-      - name: Collect build artifacts
-        if: success()
-        working-directory: ShadiOS/upstream-shadPS4
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p ../artifacts
-          find build-shadios-ios -type f \( -name '*.a' -o -name '*.xcframework' \) \
-            -print
-          find build-shadios-ios -type f -name '*.a' -exec cp {} ../artifacts/ \;
-          test -n "$(find ../artifacts -type f -name '*.a' -print -quit)" \
-            || { echo "No static library artifact found."; exit 1; }
-          ditto -c -k --sequesterRsrc ../artifacts ../ShadiOS-static-libraries.zip
-
-      - name: Upload iOS static library
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ShadiOS-iOS-ARM64
-          path: |
-            ShadiOS/artifacts/
-            ShadiOS/ShadiOS-static-libraries.zip
-          if-no-files-found: error
-          compression-level: 1
-
-      - name: Upload build diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ShadiOS-build-diagnostics
-          path: |
-            ShadiOS/upstream-shadPS4/build-shadios-ios/CMakeFiles/CMakeConfigureLog.yaml
-            ShadiOS/upstream-shadPS4/build-shadios-ios/CMakeFiles/CMakeOutput.log
-            ShadiOS/upstream-shadPS4/build-shadios-ios/CMakeCache.txt
-          if-no-files-found: ignore
-          compression-level: 6
