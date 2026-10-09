@@ -69,6 +69,21 @@ jobs:
           PATCH
           sed -n '96,115p' externals/MoltenVK/CMakeLists.txt
 
+      - name: Patch MoltenVK target dependencies
+        run: |
+          python3 - <<'PATCH'
+          from pathlib import Path
+          p = Path("externals/MoltenVK/MoltenVK/CMakeLists.txt")
+          s = p.read_text()
+          old = '    MoltenVK::ShaderConverter'
+          if old not in s:
+              raise SystemExit("ShaderConverter link not found; stopping safely.")
+          s = s.replace(old, '    $<$<BOOL:${MVK_BUILD_SHADER_CONVERTER_TOOL}>:MoltenVK::ShaderConverter>', 1)
+          p.write_text(s)
+          print("Patched ShaderConverter link.")
+          PATCH
+          grep -n -C 3 ShaderConverter externals/MoltenVK/MoltenVK/CMakeLists.txt
+
       - name: Configure MoltenVK
         run: |
           cmake -S externals/MoltenVK -B build-moltenvk-ios -G Xcode \
