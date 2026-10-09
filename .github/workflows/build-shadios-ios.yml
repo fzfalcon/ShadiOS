@@ -1,0 +1,16 @@
+name: Build ShadiOS iOS
+
+on:
+  workflow_dispatch:
+
+jobs:
+  inspect:
+    runs-on: macos-15
+    steps:
+      - name: Checkout ShadiOS
+        uses: actions/checkout@v4
+
+      - name: Inspect Xcode project
+        run: |
+          xcodebuild -list \
+            -project reference-AetherPS4/AetherPS4-iOS/AetherPS4-iOS.xcodeproj
