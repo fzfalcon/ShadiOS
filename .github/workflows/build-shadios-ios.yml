@@ -50,6 +50,38 @@ jobs:
           git -C externals/MoltenVK checkout a14cbf433414aa95da7046694b069f0f3f9263a5
           test -f externals/MoltenVK/CMakeLists.txt
 
+      - name: Patch MoltenVK for iOS
+        working-directory: ShadiOS/upstream-shadPS4
+        run: |
+          python3 - <<'PATCH'
+          from pathlib import Path
+          p = Path("externals/MoltenVK/Common/CMakeLists.txt")
+          s = p.read_text()
+          old = "find_library(APPKIT_LIBRARY AppKit REQUIRED)"
+          if old not in s:
+              raise SystemExit("Expected AppKit line not found")
+          s = s.replace(
+              old,
+              'if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")\n    ' + old + '\nendif()',
+              1
+          )
+          p.write_text(s)
+          PATCH
+
+          python3 - <<'PATCH'
+          from pathlib import Path
+          p = Path("externals/MoltenVK/CMakeLists.txt")
+          s = p.read_text()
+          marker = 'add_subdirectory("MoltenVK")'
+          if marker not in s:
+              raise SystemExit("MoltenVK target declaration not found")
+          if "framework UIKit" not in s:
+              s = s.replace(marker, marker + '\nif(CMAKE_SYSTEM_NAME STREQUAL "iOS")\n    target_link_libraries(MoltenVK PRIVATE "-framework UIKit" "-framework CoreGraphics")\nendif()', 1)
+          p.write_text(s)
+          PATCH
+
+          grep -n -C 2 APPKIT_LIBRARY externals/MoltenVK/Common/CMakeLists.txt
+
       - name: Configure iOS ARM64
         working-directory: ShadiOS/upstream-shadPS4
         run: |
