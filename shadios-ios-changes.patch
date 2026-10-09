@@ -1,0 +1,2253 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index cb508961..70e75471 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -9,8 +9,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED True)
+ 
+ if(APPLE)
+     list(APPEND ADDITIONAL_LANGUAGES OBJC)
+-    # Minimum OS version for KosmicKrisp
+-    set(CMAKE_OSX_DEPLOYMENT_TARGET 26.0 CACHE STRING "")
++    if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
++        set(CMAKE_OSX_DEPLOYMENT_TARGET 17.0 CACHE STRING "")
++    else()
++        set(CMAKE_OSX_DEPLOYMENT_TARGET 26.0 CACHE STRING "")
++    endif()
+ endif()
+ 
+ if (NOT CMAKE_BUILD_TYPE)
+@@ -263,7 +266,9 @@ if (ENABLE_SYSTEM_LIBRARIES)
+     find_package(absl 20250512.1 CONFIG)
+     if (APPLE)
+         find_package(date 3.0.1 CONFIG)
+-        find_package(epoll-shim 3.14 CONFIG)
++        if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
++    find_package(epoll-shim 3.14 CONFIG)
++endif()
+     endif()
+     list(POP_BACK CMAKE_MODULE_PATH)
+ endif()
+@@ -848,6 +853,11 @@ set(COMMON src/common/logging/classes.cpp
+            src/common/scm_rev.h
+            src/common/key_manager.cpp
+            src/common/key_manager.h
++           src/common/boot_timer.cpp
++           src/common/boot_timer.h
++           src/common/frame_presented_flag.h
++           src/common/sigsys_trap.cpp
++           src/common/sigsys_trap.h
+ )
+ 
+ if (ENABLE_DISCORD_RPC)
+@@ -967,6 +977,13 @@ set(CORE src/core/aerolib/stubs.cpp
+          src/core/user_settings.h
+ )
+ 
++if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
++    list(APPEND CORE
++        src/core/ios/ios_jit_allocator.cpp
++        src/core/ios/ios_jit_allocator.h
++    )
++endif()
++
+ if (ARCHITECTURE STREQUAL "x86_64")
+     set(CORE ${CORE}
+              src/core/cpu_patches.cpp
+@@ -1263,12 +1280,28 @@ set(SHADNET src/shadnet/client.cpp
+             src/shadnet/server_probe.h
+             "${SHADNET_PROTO_OUT}/shadnet.pb.cc"
+ )
+-if (APPLE)
++if (APPLE AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+     list(APPEND EMULATOR src/sdl_window_apple.mm)
+ endif()
+ 
+ if(NOT ENABLE_TESTS)
+ 
++if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
++add_library(shadps4 STATIC
++    ${AUDIO_CORE}
++    ${IMGUI}
++    ${INPUT}
++    ${COMMON}
++    ${CORE}
++    ${SHADER_RECOMPILER}
++    ${VIDEO_CORE}
++    ${EMULATOR}
++    ${SHADNET}
++        src/platform/ios/shadps4_ios_api.cpp
++        src/platform/ios/shadps4_ios_api.h
++    )
++    target_compile_definitions(shadps4 PUBLIC SHADPS4_LIBRARY_BUILD)
++else()
+ add_executable(shadps4
+     ${AUDIO_CORE}
+     ${IMGUI}
+@@ -1285,6 +1318,7 @@ add_executable(shadps4
+     src/sdl_window.h
+     src/sdl_window.cpp
+ )
++endif()
+ 
+ create_target_directory_groups(shadps4)
+ 
+@@ -1315,8 +1349,8 @@ if (${CMAKE_SYSTEM_NAME} STREQUAL "Linux")
+     target_link_libraries(shadps4 PRIVATE uuid)
+ endif()
+ 
+-if (APPLE)
+-    if (NOT ENABLE_SYSTEM_VULKAN)
++if (APPLE AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
++    if (NOT ENABLE_SYSTEM_VULKAN AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+         # Bundle Vulkan loader and KosmicKrisp driver with the emulator.
+         set_property(TARGET shadps4 APPEND PROPERTY BUILD_RPATH "@executable_path")
+ 
+@@ -1353,6 +1387,8 @@ if (APPLE)
+     set(INFO_PLIST_PATH ${CMAKE_CURRENT_BINARY_DIR}/src/dist/Info.plist)
+     configure_file(${CMAKE_CURRENT_SOURCE_DIR}/src/dist/MacOSBundleInfo.plist.in ${INFO_PLIST_PATH})
+     target_link_options(shadps4 PRIVATE LINKER:-sectcreate,__TEXT,__info_plist,${INFO_PLIST_PATH})
++elseif (CMAKE_SYSTEM_NAME STREQUAL "iOS")
++    target_link_libraries(shadps4 PRIVATE epoll-shim MoltenVK::MoltenVK)
+ elseif (${CMAKE_SYSTEM_NAME} STREQUAL "FreeBSD")
+     target_link_libraries(shadps4 PRIVATE date::date-tz epoll-shim)
+ endif()
+diff --git a/externals/CMakeLists.txt b/externals/CMakeLists.txt
+index 5d59aaa4..f2566b69 100644
+--- a/externals/CMakeLists.txt
++++ b/externals/CMakeLists.txt
+@@ -372,8 +372,15 @@ else()
+     message(STATUS "cpp-httplib: OpenSSL/LibreSSL not available — libSceHttp HTTPS will fall back to mock at runtime.")
+ endif()
+ 
++# iOS Vulkan implementation
++if (CMAKE_SYSTEM_NAME STREQUAL "iOS")
++    set(MVK_BUILD_SHADER_CONVERTER_TOOL OFF CACHE BOOL "" FORCE)
++    set(MVK_EXCLUDE_SPIRV_TOOLS ON CACHE BOOL "" FORCE)
++    add_subdirectory(MoltenVK)
++endif()
++
+ # macOS Vulkan driver
+-if (APPLE AND NOT ENABLE_SYSTEM_VULKAN AND NOT ENABLE_TESTS)
++if (APPLE AND NOT ENABLE_SYSTEM_VULKAN AND NOT ENABLE_TESTS AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+     add_subdirectory(vulkan-loader)
+     set(VULKAN_LOADER_PATH "${CMAKE_CURRENT_BINARY_DIR}/vulkan-loader/loader/libvulkan.dylib" PARENT_SCOPE)
+ 
+diff --git a/src/common/boot_timer.cpp b/src/common/boot_timer.cpp
+new file mode 100644
+index 00000000..20ac5d30
+--- /dev/null
++++ b/src/common/boot_timer.cpp
+@@ -0,0 +1,31 @@
++// SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#include <atomic>
++#include <chrono>
++
++#include "common/boot_timer.h"
++
++namespace Common {
++
++namespace {
++std::atomic<int64_t> g_boot_start_ns{0};
++}
++
++void MarkBootStart() {
++    const auto now = std::chrono::steady_clock::now().time_since_epoch();
++    g_boot_start_ns.store(std::chrono::duration_cast<std::chrono::nanoseconds>(now).count(),
++                          std::memory_order_relaxed);
++}
++
++s64 BootElapsedMs() {
++    const auto start_ns = g_boot_start_ns.load(std::memory_order_relaxed);
++    if (start_ns == 0) {
++        return -1;
++    }
++    const auto now = std::chrono::steady_clock::now().time_since_epoch();
++    const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now).count();
++    return (now_ns - start_ns) / 1'000'000;
++}
++
++} // namespace Common
+diff --git a/src/common/boot_timer.h b/src/common/boot_timer.h
+new file mode 100644
+index 00000000..db0395a2
+--- /dev/null
++++ b/src/common/boot_timer.h
+@@ -0,0 +1,20 @@
++// SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#pragma once
++
++#include "common/types.h"
++
++namespace Common {
++
++// Diagnostic-only stopwatch for finding out where game-launch time actually goes -- boot
++// time was reported as "takes so long" with no profiler available on-device to measure it
++// directly, so this logs real elapsed milliseconds at each major phase instead of guessing.
++// MarkBootStart() must be called once, from Emulator::PrepareWindow()'s first line (the
++// earliest point common to every launch); BootElapsedMs() is safe to call from any thread
++// after that (checkpoints are logged from both the main thread and the guest's own Game:Main
++// thread).
++void MarkBootStart();
++s64 BootElapsedMs();
++
++} // namespace Common
+diff --git a/src/common/frame_presented_flag.h b/src/common/frame_presented_flag.h
+new file mode 100644
+index 00000000..df9fc5f3
+--- /dev/null
++++ b/src/common/frame_presented_flag.h
+@@ -0,0 +1,40 @@
++// SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#pragma once
++
++#include <atomic>
++
++// Cross-cutting signal for "has the emulator successfully presented at least one real
++// frame yet" -- set by the Vulkan presenter (vk_presenter.cpp) the first time
++// swapchain.Present() succeeds, read by the iOS host app (shadps4_ios_api.cpp) so its
++// Swift-side boot loading overlay knows when to dismiss itself in favor of the actual
++// game video, rather than guessing with a fixed timeout.
++namespace Common {
++
++inline std::atomic<bool>& FramePresentedFlag() {
++    static std::atomic<bool> flag{false};
++    return flag;
++}
++
++// Total count of successful presents so far, incremented alongside FramePresentedFlag --
++// unlike that flag (which only ever tells you "at least one"), this lets a poller compute a
++// live FPS by sampling the counter twice and dividing the delta by the elapsed wall time
++// (see PerformanceOverlayWindow.swift). Relaxed ordering is fine: this is a monotonically
++// increasing counter read for a rough per-second rate, not synchronized with anything else.
++inline std::atomic<uint64_t>& PresentedFrameCount() {
++    static std::atomic<uint64_t> count{0};
++    return count;
++}
++
++// Fired exactly once, synchronously, from whichever thread first flips FramePresentedFlag
++// to true (the Vulkan presenter's own render thread -- see vk_presenter.cpp) -- pushed
++// rather than polled, so the host app finds out the instant it happens instead of up to
++// one polling-interval late. Registered via shadps4_register_first_frame_callback
++// (shadps4_ios_api.h) before shadps4_run() is called.
++inline std::atomic<void (*)()>& FramePresentedCallback() {
++  static std::atomic<void (*)()> callback{nullptr};
++  return callback;
++}
++
++} // namespace Common
+diff --git a/src/common/logging/log.cpp b/src/common/logging/log.cpp
+index d5276147..fda7f4a3 100644
+--- a/src/common/logging/log.cpp
++++ b/src/common/logging/log.cpp
+@@ -201,8 +201,10 @@ void UpdateLogLevels(std::string_view log_filter) {
+ 
+     if (EmulatorSettings.IsLogEnable()) {
+         for (const auto class_level : std::views::split(log_filter, ' ')) {
+-            const auto class_level_pair =
+-                std::views::split(class_level, ':') | std::ranges::to<std::vector<std::string>>();
++            std::vector<std::string> class_level_pair;
++            for (const auto part : std::views::split(class_level, ':')) {
++                class_level_pair.emplace_back(part.begin(), part.end());
++            }
+ 
+             if (class_level_pair.size() != 2) {
+                 LOG_ERROR(Config, "bad log filter provided");
+@@ -210,12 +212,10 @@ void UpdateLogLevels(std::string_view log_filter) {
+             }
+ 
+             if (class_level_pair.front()[0] == '*') {
+-                default_log_level = spdlog::level_from_str(class_level_pair.back() |
+-                                                           std::ranges::to<std::string>());
++                default_log_level = spdlog::level_from_str(class_level_pair.back());
+             } else {
+-                log_level_per_class[class_level_pair.front() | std::ranges::to<std::string>()] =
+-                    spdlog::level_from_str(class_level_pair.back() |
+-                                           std::ranges::to<std::string>());
++                log_level_per_class[class_level_pair.front()] =
++                    spdlog::level_from_str(class_level_pair.back());
+             }
+         }
+     }
+diff --git a/src/common/sigsys_trap.cpp b/src/common/sigsys_trap.cpp
+new file mode 100644
+index 00000000..cd4cafc6
+--- /dev/null
++++ b/src/common/sigsys_trap.cpp
+@@ -0,0 +1,167 @@
++#include <cstdint>
++// SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#include "common/sigsys_trap.h"
++
++#include <array>
++#include <cstdio>
++#include <cstring>
++#include <signal.h>
++#include <unistd.h>
++
++#ifdef __APPLE__
++// Darwin's <ucontext.h> hard-errors on the deprecated getcontext/setcontext/swapcontext
++// declarations unless _XOPEN_SOURCE is defined; only the ucontext_t/mcontext_t *types*
++// are needed below, never those functions. pc/sp/fp/lr are pointer-authentication-opaque
++// fields on Apple Silicon requiring the arm_thread_state64_get_* accessor macros.
++#define _XOPEN_SOURCE 1
++#include <ucontext.h>
++#include <mach/arm/thread_status.h>
++#include <pthread.h>
++#else
++#include <sys/syscall.h>
++#include <ucontext.h>
++#endif
++
++#ifdef SHADPS4_ENABLE_FEX_GUEST_CPU
++#include "core/fex/fex_guest_engine.h"
++#endif
++
++namespace Common {
++
++namespace {
++struct sigaction g_old_sigsys_action;
++// Alternate signal stack so the handler can run even if the crashing thread's
++// stack is exhausted. SA_ONSTACK (set below) routes the signal here.
++std::array<unsigned char, 65536> g_sigsys_altstack alignas(16){};
++
++void BachataSigsysHandler(int signo, siginfo_t* info, void* uctx) {
++    ucontext_t* _ctx = reinterpret_cast<ucontext_t*>(uctx);
++    uint64_t pc = 0, sp = 0, x8 = 0;
++    uint64_t x0 = 0, x1 = 0, x2 = 0, x3 = 0, x4 = 0, x5 = 0, x29 = 0, x30 = 0;
++#ifdef __aarch64__
++    if (_ctx) {
++#ifdef __APPLE__
++        const auto& ts = _ctx->uc_mcontext->__ss;
++        pc = (uint64_t)arm_thread_state64_get_pc(ts);
++        sp = (uint64_t)arm_thread_state64_get_sp(ts);
++        x8 = ts.__x[8];
++        x0 = ts.__x[0];
++        x1 = ts.__x[1];
++        x2 = ts.__x[2];
++        x3 = ts.__x[3];
++        x4 = ts.__x[4];
++        x5 = ts.__x[5];
++        x29 = (uint64_t)arm_thread_state64_get_fp(ts);
++        x30 = (uint64_t)arm_thread_state64_get_lr(ts);
++#else
++        pc = _ctx->uc_mcontext.pc;
++        sp = _ctx->uc_mcontext.sp;
++        x8 = _ctx->uc_mcontext.regs[8];
++        x0 = _ctx->uc_mcontext.regs[0];
++        x1 = _ctx->uc_mcontext.regs[1];
++        x2 = _ctx->uc_mcontext.regs[2];
++        x3 = _ctx->uc_mcontext.regs[3];
++        x4 = _ctx->uc_mcontext.regs[4];
++        x5 = _ctx->uc_mcontext.regs[5];
++        x29 = _ctx->uc_mcontext.regs[29];
++        x30 = _ctx->uc_mcontext.regs[30];
++#endif
++    }
++#endif
++
++    // Best-effort guest RIP/syscall capture. On the FEX guest CPU path, mid-JIT
++    // guest state lives in SRA host regs, but at a host syscall boundary the
++    // CurrentFrame holds the spilled guest RIP and RAX. Returns false (leaves
++    // guest_rip/guest_syscall as the "unavailable" sentinels) when no FEX thread
++    // is active (e.g. crash during host-only init or in a non-FEX host library).
++    uint64_t guest_rip = 0;
++    uint64_t guest_syscall = 0;
++    bool have_guest = false;
++#ifdef SHADPS4_ENABLE_FEX_GUEST_CPU
++    have_guest = AetherPS4::Fex::BachataQueryGuestRipSyscall(&guest_rip, &guest_syscall);
++#endif
++
++#ifdef __APPLE__
++    uint64_t apple_tid = 0;
++    pthread_threadid_np(nullptr, &apple_tid);
++#endif
++
++    char buf[1024];
++    int len = snprintf(buf, sizeof(buf),
++        "[Bachata.FEX.SIGSYS] signo=%d\n"
++        "[Bachata.FEX.SIGSYS] code=%d\n"
++        "[Bachata.FEX.SIGSYS] errno=%d\n"
++        "[Bachata.FEX.SIGSYS] syscall=%d\n"
++        "[Bachata.FEX.SIGSYS] arch=0x%x\n"
++        "[Bachata.FEX.SIGSYS] call_addr=0x%lx\n"
++        "[Bachata.FEX.SIGSYS] host_pc=0x%lx\n"
++        "[Bachata.FEX.SIGSYS] host_x8=%lu\n"
++        "[Bachata.FEX.SIGSYS] guest_rip=0x%lx\n"
++        "[Bachata.FEX.SIGSYS] guest_syscall=%s%lu\n"
++        "[Bachata.FEX.SIGSYS] host_sp=0x%lx host_x0=0x%lx host_x1=0x%lx host_x2=0x%lx host_x3=0x%lx host_x4=0x%lx host_x5=0x%lx host_x29=0x%lx host_x30=0x%lx pid=%d tid=%ld\n",
++        info ? info->si_signo : signo,
++        info ? info->si_code : 0,
++        info ? info->si_errno : 0,
++#ifdef __APPLE__
++        // si_syscall/si_arch/si_call_addr are populated by Linux's seccomp-based syscall
++        // filtering, which SIGSYS is normally paired with there; Darwin has no seccomp
++        // equivalent and siginfo_t carries none of these fields, so there's nothing
++        // meaningful to report here.
++        -1,
++        0u,
++        0UL,
++#else
++        info ? info->si_syscall : -1,
++        info ? info->si_arch : 0,
++        info ? (unsigned long)(uintptr_t)info->si_call_addr : 0UL,
++#endif
++        (unsigned long)pc,
++        (unsigned long)x8,
++        (unsigned long)guest_rip,
++        have_guest ? "" : "unavailable ",
++        (unsigned long)guest_syscall,
++        (unsigned long)sp, (unsigned long)x0, (unsigned long)x1, (unsigned long)x2,
++        (unsigned long)x3, (unsigned long)x4, (unsigned long)x5, (unsigned long)x29,
++        (unsigned long)x30, ::getpid(),
++#ifdef __APPLE__
++        (long)apple_tid);
++#else
++        (long)::syscall(SYS_gettid));
++#endif
++
++    if (len > 0) {
++        ::write(STDERR_FILENO, buf, static_cast<size_t>(len));
++    }
++
++    if (g_old_sigsys_action.sa_flags & SA_SIGINFO) {
++        if (g_old_sigsys_action.sa_sigaction) {
++            g_old_sigsys_action.sa_sigaction(signo, info, uctx);
++        }
++    } else if (g_old_sigsys_action.sa_handler != SIG_DFL && g_old_sigsys_action.sa_handler != SIG_IGN) {
++        g_old_sigsys_action.sa_handler(signo);
++    } else {
++        signal(signo, SIG_DFL);
++        raise(signo);
++    }
++}
++} // namespace
++
++void InstallBachataSigsysTrap() {
++    // Install an alternate stack first: SA_ONSTACK redirects the signal here so
++    // the handler runs even on an exhausted main stack.
++    stack_t ss{};
++    ss.ss_sp = g_sigsys_altstack.data();
++    ss.ss_size = g_sigsys_altstack.size();
++    ss.ss_flags = 0;
++    sigaltstack(&ss, nullptr);
++
++    struct sigaction sa{};
++    sa.sa_sigaction = BachataSigsysHandler;
++    sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
++    sigemptyset(&sa.sa_mask);
++    sigaction(SIGSYS, &sa, &g_old_sigsys_action);
++}
++
++} // namespace Common
+diff --git a/src/common/sigsys_trap.h b/src/common/sigsys_trap.h
+new file mode 100644
+index 00000000..41f792a4
+--- /dev/null
++++ b/src/common/sigsys_trap.h
+@@ -0,0 +1,15 @@
++// SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#pragma once
++
++namespace Common {
++
++// Installs a SIGSYS handler that dumps host/guest register state to stderr before
++// chaining to whatever handler was previously installed. FEXCore's guest CPU raises
++// SIGSYS on syscall-filter faults, so this is the primary tool for diagnosing JIT
++// guest-CPU crashes (bad guest RIP, unhandled syscall) on any platform running the
++// FEX guest CPU, not just the original Android runtime target it was written for.
++void InstallBachataSigsysTrap();
++
++} // namespace Common
+diff --git a/src/core/ios/ios_jit_allocator.cpp b/src/core/ios/ios_jit_allocator.cpp
+new file mode 100644
+index 00000000..20b8afd3
+--- /dev/null
++++ b/src/core/ios/ios_jit_allocator.cpp
+@@ -0,0 +1,282 @@
++// SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++// ios_jit_allocator.cpp — iOS dual-mapped JIT memory implementation.
++//
++// See ios_jit_allocator.h for full protocol documentation.
++//
++// This translation unit is only compiled when targeting arm64-apple-ios.
++// On all other platforms the header's include guard keeps it inert.
++
++#ifdef __APPLE__
++#include <TargetConditionals.h>
++#endif
++
++#if defined(__APPLE__) && TARGET_OS_IPHONE
++
++#include "core/ios/ios_jit_allocator.h"
++
++#include "common/logging/log.h"
++
++#include <atomic>
++#include <chrono>
++#include <dlfcn.h>              // dlopen, dlsym
++#include <libkern/OSCacheControl.h> // sys_icache_invalidate
++#include <mach/mach.h>          // mach_task_self
++#include <mach/vm_map.h>        // vm_remap, vm_protect, vm_deallocate (mach_vm.h is unavailable on iOS)
++#include <sys/mman.h>           // mmap, munmap, PROT_*, MAP_*
++#include <thread>               // std::this_thread::sleep_for
++#include <utility>              // std::exchange
++
++// __builtin___clear_cache lowers to a call to this exact symbol on this toolchain rather than
++// inlining the AArch64 cache-maintenance instructions directly -- and Apple's real-device iOS
++// compiler-rt archive (libclang_rt.ios.a) doesn't provide it (confirmed via nm; oddly, the
++// simulator archive libclang_rt.iossim.a does). Every call site needing it in this codebase
++// (FEXCore's JIT, the shader recompiler's SRT walker JIT) is compiled for this exact toolchain,
++// so providing the symbol ourselves via Darwin's public sys_icache_invalidate -- the same
++// primitive CodeCache.cpp already uses -- is simpler and more reliable than trying to coax a
++// different compiler-rt archive into the link.
++extern "C" void __clear_cache(void* start, void* end) {
++    sys_icache_invalidate(start, static_cast<size_t>(static_cast<char*>(end) - static_cast<char*>(start)));
++}
++
++// BreakpointJIT.framework — the three BRK-trap JIT "syscalls".
++//
++// This framework is intentionally NOT linked by the Xcode target and must not
++// appear in the app's LC_LOAD_DYLIB list. If it is, dyld auto-loads it at
++// process launch, before the app runs — and on sideloaded/free-provisioning
++// builds AMFI rejects any embedded framework that carries entitlements but
++// isn't the main binary ("has entitlements but is not a main binary"),
++// crashing the process with SIGABRT during static initialization before
++// main() ever runs. Loading it lazily via dlopen()/dlsym() at first use
++// avoids the launch-time AMFI check entirely. The framework is still copied
++// into the app bundle (via a Run Script build phase, not "Embed & Sign") so
++// it's present on disk for this dlopen to find.
++namespace {
++
++using BreakGetJITMappingFn = void* (*)(void*, size_t);
++using BreakJITDetachFn = void (*)();
++
++struct BreakpointJITSymbols {
++    BreakGetJITMappingFn get_jit_mapping = nullptr;
++    BreakJITDetachFn jit_detach = nullptr;
++};
++
++const BreakpointJITSymbols& GetBreakpointJITSymbols() noexcept {
++    static const BreakpointJITSymbols symbols = [] {
++        BreakpointJITSymbols s;
++        void* handle = dlopen(
++            "@executable_path/Frameworks/BreakpointJIT.framework/BreakpointJIT",
++            RTLD_NOW | RTLD_LOCAL);
++        if (handle == nullptr) {
++            LOG_CRITICAL(Core, "ios_jit_allocator: dlopen(BreakpointJIT) failed: {}",
++                         dlerror());
++            return s;
++        }
++        s.get_jit_mapping =
++            reinterpret_cast<BreakGetJITMappingFn>(dlsym(handle, "BreakGetJITMapping"));
++        s.jit_detach = reinterpret_cast<BreakJITDetachFn>(dlsym(handle, "BreakJITDetach"));
++        if (s.get_jit_mapping == nullptr || s.jit_detach == nullptr) {
++            LOG_CRITICAL(Core, "ios_jit_allocator: dlsym failed to resolve BreakpointJIT symbols: {}",
++                         dlerror());
++        }
++        return s;
++    }();
++    return symbols;
++}
++
++} // namespace
++
++namespace Core {
++
++// Set (via IosJitTrapGuard below) for exactly the duration of the BreakGetJITMapping call --
++// the one place in this file that issues the BRK #0xf00d instruction documented at the top of
++// ios_jit_allocator.h. If StikDebug isn't there to service it (killed by iOS's own background
++// wake-rate limiter, confirmed on-device via a Console.app capture showing it hit a
++// "cpulimit violation" mid-session -- a different cause than the app itself ever calling
++// Detach() early, which fex_guest_engine.cpp's own comment already covers), the BRK delivers a
++// real, unhandled SIGTRAP that kills the whole process outright -- there is no return from
++// get_jit_mapping() to recover from, ios_jit_allocator.h's own doc comment already established
++// that. signals.cpp checks this flag to distinguish "this SIGTRAP is the JIT-mapping BRK
++// StikDebug failed to intercept" (recoverable: simulate get_jit_mapping() returning nullptr,
++// the same failure DualMappedRegion::Allocate() already handles below) from any other SIGTRAP
++// (a real debugger breakpoint, which must not be silently swallowed).
++thread_local bool g_expecting_jit_mapping_trap = false;
++
++class IosJitTrapGuard final {
++public:
++  IosJitTrapGuard() { g_expecting_jit_mapping_trap = true; }
++  ~IosJitTrapGuard() { g_expecting_jit_mapping_trap = false; }
++  IosJitTrapGuard(const IosJitTrapGuard&) = delete;
++  IosJitTrapGuard& operator=(const IosJitTrapGuard&) = delete;
++};
++
++// ─── DualMappedRegion ────────────────────────────────────────────────────────
++
++// Own counter, separate from FEXCore's (Utils/Allocator.cpp's AllocationCounter) since the two
++// live in different static libraries -- both log through the same LogMan/spdlog sink though, so
++// the "ios_jit_allocator #N" / "iOSJITAlloc #N" tags together with the log's chronological
++// ordering still reconstruct the full cross-library request timeline.
++namespace {
++std::atomic<uint64_t> g_allocation_counter{0};
++}
++
++DualMappedRegion DualMappedRegion::Allocate(size_t bytes) noexcept {
++    DualMappedRegion region;
++    const uint64_t request_number = g_allocation_counter.fetch_add(1, std::memory_order_relaxed) + 1;
++
++    // Ask the StikDebug-serviced BRK protocol for a FRESH allocation (x0 == 0) to get the
++    // EXECUTABLE side of the mapping -- see this file's top-of-file comment for why this is the
++    // branch to use, and why a second, local mach_vm_remap is needed for the writable side.
++    //
++    //    Protocol (JIT26PrepareRegion / brk #0xf00d, x16=1):
++    //      x0 = 0, x1 = bytes
++    //    Returns: a fresh, debugger-allocated address (now executable) in x0, or nullptr on
++    //    failure (BreakpointJIT itself unavailable; a *silent* server-side failure to actually
++    //    grant the permission is not distinguishable from success here).
++    const auto& symbols = GetBreakpointJITSymbols();
++    if (symbols.get_jit_mapping == nullptr) {
++        LOG_CRITICAL(Core, "ios_jit_allocator #{}: BreakpointJIT symbols unavailable; cannot allocate JIT region",
++                     request_number);
++        return region; // invalid
++    }
++
++    // A failed request here (nullptr, whether a genuine one from BreakGetJITMapping itself or
++    // one simulated by signals.cpp's SIGTRAP handler after an unserviced BRK -- see
++    // g_expecting_jit_mapping_trap's comment) doesn't distinguish "StikDebug is permanently
++    // gone" from "StikDebug is just momentarily unresponsive" (busy servicing another request,
++    // or briefly suspended by iOS before resuming) -- both look identical from here. A few
++    // retries with a short backoff costs little (this is already the slow, on-demand path --
++    // see flatten_extended_userdata_pass.cpp's own comment on why these calls happen mid-
++    // gameplay rather than being front-loaded) and covers the transient case; it does nothing
++    // for a StikDebug that's truly dead for the rest of the session, but there's no way to
++    // tell those apart in advance, so retrying is strictly no worse than failing immediately.
++    constexpr int kMaxAttempts = 3;
++    constexpr auto kRetryDelay = std::chrono::milliseconds(50);
++    void* rx = nullptr;
++    for (int attempt = 1; attempt <= kMaxAttempts; ++attempt) {
++        LOG_INFO(Core,
++                 "ios_jit_allocator #{}: requesting fresh execute-capable region (size={}) "
++                 "attempt={}/{}",
++                 request_number, bytes, attempt, kMaxAttempts);
++        {
++            IosJitTrapGuard trap_guard;
++            rx = symbols.get_jit_mapping(nullptr, bytes);
++        }
++        LOG_INFO(Core, "ios_jit_allocator #{}: BreakGetJITMapping returned {} (execute-side)",
++                 request_number, rx);
++        if (rx != nullptr) {
++            break;
++        }
++        if (attempt < kMaxAttempts) {
++            LOG_WARNING(Core,
++                       "ios_jit_allocator #{}: attempt {}/{} failed, retrying after {}ms",
++                       request_number, attempt, kMaxAttempts, kRetryDelay.count());
++            std::this_thread::sleep_for(kRetryDelay);
++        }
++    }
++    if (rx == nullptr) {
++        LOG_CRITICAL(Core,
++            "ios_jit_allocator: BreakGetJITMapping(nullptr, {}) returned nullptr after {} "
++            "attempts. StikDebug with the Universal JIT Script must be attached before "
++            "shadps4_init() is called. See the StikDebug URL-scheme handoff "
++            "sequence in JITSupport.swift.",
++            bytes, kMaxAttempts);
++        return region; // invalid
++    }
++
++    // Remap a second, writable virtual alias of the SAME physical pages, purely locally -- no
++    // debugger involvement needed for this half (see this file's top-of-file comment).
++    // mach_vm.h's 64-bit-explicit API isn't available on iOS ("mach_vm.h unsupported" from the
++    // SDK itself) -- vm_map.h's classic API works the same way here since vm_address_t is
++    // pointer-width on 64-bit Darwin.
++    vm_address_t rw = 0;
++    vm_prot_t cur_prot = VM_PROT_NONE, max_prot = VM_PROT_NONE;
++    kern_return_t kr = vm_remap(mach_task_self(), &rw, static_cast<vm_size_t>(bytes), /*mask=*/0,
++                                 VM_FLAGS_ANYWHERE, mach_task_self(), reinterpret_cast<vm_address_t>(rx),
++                                 /*copy=*/FALSE, &cur_prot, &max_prot, VM_INHERIT_NONE);
++    if (kr != KERN_SUCCESS) {
++        LOG_CRITICAL(Core,
++            "ios_jit_allocator #{}: vm_remap failed for execute-side {} (size={}): "
++            "kern_return_t {} ({})",
++            request_number, rx, bytes, static_cast<int>(kr), mach_error_string(kr));
++        return region; // invalid
++    }
++    kr = vm_protect(mach_task_self(), rw, static_cast<vm_size_t>(bytes), /*set_maximum=*/FALSE,
++                     VM_PROT_READ | VM_PROT_WRITE);
++    if (kr != KERN_SUCCESS) {
++        LOG_CRITICAL(Core,
++            "ios_jit_allocator #{}: vm_protect(RW) failed for remapped {} (size={}): "
++            "kern_return_t {} ({})",
++            request_number, reinterpret_cast<void*>(rw), bytes, static_cast<int>(kr), mach_error_string(kr));
++        vm_deallocate(mach_task_self(), rw, static_cast<vm_size_t>(bytes));
++        return region; // invalid
++    }
++
++    region.rw_addr = reinterpret_cast<uint8_t*>(rw);
++    region.rx_addr = static_cast<uint8_t*>(rx);
++    region.size    = bytes;
++
++    LOG_DEBUG(Core,
++              "ios_jit_allocator: allocated dual-mapped region: "
++              "rw={} rx={} size={}",
++              static_cast<void*>(region.rw_addr),
++              static_cast<void*>(region.rx_addr),
++              region.size);
++
++    return region;
++}
++
++void DualMappedRegion::Release() noexcept {
++    if (rw_addr != nullptr) {
++        vm_deallocate(mach_task_self(), reinterpret_cast<vm_address_t>(rw_addr), static_cast<vm_size_t>(size));
++        rw_addr = nullptr;
++    }
++    if (rx_addr != nullptr) {
++        vm_deallocate(mach_task_self(), reinterpret_cast<vm_address_t>(rx_addr), static_cast<vm_size_t>(size));
++        rx_addr = nullptr;
++    }
++    size = 0;
++}
++
++DualMappedRegion::DualMappedRegion(DualMappedRegion&& o) noexcept
++    : rw_addr{std::exchange(o.rw_addr, nullptr)}
++    , rx_addr{std::exchange(o.rx_addr, nullptr)}
++    , size{std::exchange(o.size, 0)} {}
++
++DualMappedRegion& DualMappedRegion::operator=(DualMappedRegion&& o) noexcept {
++    if (this != &o) {
++        Release();
++        rw_addr = std::exchange(o.rw_addr, nullptr);
++        rx_addr = std::exchange(o.rx_addr, nullptr);
++        size    = std::exchange(o.size, 0);
++    }
++    return *this;
++}
++
++// ─── IosJitAllocator::Detach ─────────────────────────────────────────────────
++
++namespace IosJitAllocator {
++
++void Detach() noexcept {
++    // BRK #0xf00d with x16=0 → JIT26Detach → GDB "D" (detach).
++    // Safe to call on non-TXM and TXM devices alike.
++    const auto& symbols = GetBreakpointJITSymbols();
++    if (symbols.jit_detach == nullptr) {
++        LOG_ERROR(Core, "ios_jit_allocator: BreakJITDetach symbol unavailable; skipping detach");
++        return;
++    }
++    LOG_INFO(Core, "ios_jit_allocator: calling BreakJITDetach() — debugger will detach");
++    symbols.jit_detach();
++    LOG_INFO(Core, "ios_jit_allocator: debugger detached; RX mappings persist");
++}
++
++bool IsExpectingJitMappingTrap() noexcept {
++    return g_expecting_jit_mapping_trap;
++}
++
++} // namespace IosJitAllocator
++
++} // namespace Core
++
++#endif // defined(__APPLE__) && TARGET_OS_IPHONE
+diff --git a/src/core/ios/ios_jit_allocator.h b/src/core/ios/ios_jit_allocator.h
+new file mode 100644
+index 00000000..9cb4b8e2
+--- /dev/null
++++ b/src/core/ios/ios_jit_allocator.h
+@@ -0,0 +1,150 @@
++// SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++// ios_jit_allocator.h — iOS in-place JIT memory via StikDebug's BreakpointJIT protocol.
++//
++// Background: iOS enforces W^X strictly and never grants PROT_EXEC to an unentitled
++// app through mmap/mprotect. The workaround used by MeloNX/LibRyujinx (and adapted
++// here for Bachata-S4) is the "BreakpointJIT" framework: a tiny static framework
++// whose three functions (`BreakGetJITMapping`, `BreakMarkJITMapping`, `BreakJITDetach`)
++// execute ARM64 BRK-trap instructions that are serviced by an attached external debugger
++// (StikDebug running the "Universal JIT Script").
++//
++// Protocol summary (read from StikDebug's actual source -- github.com/StikDebug/StikDebug,
++// `Scripts/universal.js`'s `JIT26PrepareRegion` and `JSSupport/JSDebugSupport.swift`'s
++// `handleJITPageWrite`):
++//
++//   BreakGetJITMapping(addr, len)
++//     BRK #0xf00d with x16=1 → JIT26PrepareRegion on debugger side. Two distinct branches:
++//     * addr == nullptr ("fresh allocation"): debugger allocates a brand-new region of `len`
++//       bytes itself via a GDB-remote "_M<len>,rx" command, then passes THAT address to
++//       `prepare_memory_region`. This is the branch actually used here (and by every other
++//       JIT'd app confirmed working against this protocol -- Ryujinx/AetherX's
++//       DualMappedJitAllocator).
++//     * addr != nullptr ("grant an address I already own"): skips the `_M` allocate step and
++//       passes the caller's own pre-existing address straight to `prepare_memory_region`. On-
++//       device testing traced a real, reproducible execute-permission failure to this branch
++//       specifically: the call returns successfully (same address handed back), yet every
++//       subsequent attempt to actually branch into that memory faults, forever -- confirmed via
++//       raw GDB-remote wire capture showing zero memory-write packets ever sent for it and a
++//       stuck fault-resume loop. Do not use this branch.
++//     In both branches, `prepare_memory_region` then -- for every 16KB page in the range --
++//     sends a raw GDB-remote memory-write command (`M<page_addr>,1:69#checksum`, writing the
++//     single byte 0x69) directly to debugserver. The *act* of debugserver performing that
++//     out-of-process write is what grants the page execute permission as a side effect
++//     (debugserver has elevated privileges an app's own mprotect() doesn't).
++//     Returns: the address that ended up executable (the freshly-allocated one, for the
++//     branch actually used here), or nullptr if BreakpointJIT itself is unavailable. This
++//     address is genuinely execute-only -- confirmed on-device that a plain write to it
++//     SIGSEGVs from ordinary host code -- so DualMappedRegion::Allocate() below additionally
++//     does a local `mach_vm_remap` to get a second, writable alias of the same physical pages.
++//
++//   BreakJITDetach()
++//     BRK #0xf00d with x16=0 → JIT26Detach → sends GDB "D" (detach).
++//     Call once after all JIT mappings are established. Not currently called
++//     anywhere in this codebase -- see fex_guest_engine.cpp's comment on why the
++//     debugger is kept attached for the whole session (calling this early once
++//     caused execute-permission loss, consistent with permission here being tied
++//     to the debugger staying attached rather than being a one-time, permanent grant).
++//
++//   BreakMarkJITMapping(size_t bytes)   ← DO NOT USE in new code.
++//     BRK #0x69 (legacy). The universal JIT26 script returns 0xE0000069 for
++//     this opcode. Only old, pre-universal-script StikDebug versions handled it.
++//
++// Usage pattern (call from C++, before the main emulator run loop):
++//
++//   #if defined(__APPLE__) && TARGET_OS_IPHONE
++//   auto region = DualMappedRegion::Allocate(page_size);
++//   if (!region) { /* StikDebug not attached, script not running, or remap failed */ abort(); }
++//   // Write code through region.rw_addr ...
++//   __builtin___clear_cache(region.rw_addr, region.rw_addr + region.size);
++//   // ... and execute via region.rx_addr -- a genuinely different virtual address, backed by
++//   // the same physical pages (see this file's top comment).
++//   #endif
++//
++// On TXM devices (A15+, M2+): only BreakGetJITMapping works; BreakMarkJITMapping
++// is dead. This header/implementation uses BreakGetJITMapping exclusively, so it
++// is TXM-safe without any extra branching.
++
++#pragma once
++
++#ifdef __APPLE__
++#include <TargetConditionals.h>
++#endif
++
++#if defined(__APPLE__) && TARGET_OS_IPHONE
++
++#include <cstddef>
++#include <cstdint>
++
++namespace Core {
++
++// A single JIT-capable region, genuinely dual-mapped: rw_addr and rx_addr are two different
++// virtual addresses backed by the same physical pages -- rx_addr from BreakGetJITMapping's
++// fresh-allocation branch, rw_addr from a local mach_vm_remap of that same memory (see this
++// file's top-of-file comment for why both steps are needed).
++//
++// Lifetime: both mappings are owned by this struct and separately deallocated on destruction
++// (mach_vm_deallocate on each address -- they're independent vm_map entries now, not aliases
++// of one single mapping).
++struct DualMappedRegion {
++    uint8_t* rw_addr{nullptr}; ///< Write JIT code here.
++    uint8_t* rx_addr{nullptr}; ///< Different address, same physical pages; call/branch to here.
++    size_t   size{0};          ///< Length of the mapping, in bytes.
++
++    // Returns true if both pointers are non-null and size > 0.
++    [[nodiscard]] bool IsValid() const noexcept {
++        return rw_addr != nullptr && rx_addr != nullptr && size > 0;
++    }
++
++    // Allocates `size` bytes of JIT-capable memory: BreakGetJITMapping's fresh-allocation
++    // branch (addr == nullptr -- see this file's top comment) for the executable side, then a
++    // local mach_vm_remap for the writable side.
++    //
++    // Returns an invalid (nullptr) region if BreakGetJITMapping returns nullptr (script not
++    // running, or a JIT26 protocol error while a debugger IS attached), or if the
++    // remap/protect step fails (check device logs either way). CALLER MUST already know a
++    // debugger is attached before calling this -- if none is, the BRK instruction this issues
++    // has no debugger to route to and raises a raw, unhandled SIGTRAP that kills the process
++    // outright rather than returning here at all (confirmed on-device: fex_guest_engine.cpp's
++    // "Do NOT detach the debugger here" comment documents the same failure mode from a
++    // different call site). This was previously (wrongly) documented here as a graceful
++    // "StikDebug not attached" case; it is not.
++    [[nodiscard]] static DualMappedRegion Allocate(size_t bytes) noexcept;
++
++    // Releases both mappings. Safe to call on an invalid region.
++    void Release() noexcept;
++
++    // Non-copyable, moveable.
++    DualMappedRegion() noexcept = default;
++    ~DualMappedRegion() noexcept { Release(); }
++    DualMappedRegion(const DualMappedRegion&) = delete;
++    DualMappedRegion& operator=(const DualMappedRegion&) = delete;
++    DualMappedRegion(DualMappedRegion&& o) noexcept;
++    DualMappedRegion& operator=(DualMappedRegion&& o) noexcept;
++};
++
++namespace IosJitAllocator {
++
++// Call once after all DualMappedRegion::Allocate() calls have completed,
++// before the emulator's main run loop starts. Instructs the StikDebug debugger
++// to detach from the process (BreakJITDetach / BRK #0xf00d, x16=0).
++//
++// Detaching is safe: the RX mappings already exist in the process's vm_map and
++// persist independently of the debugger. After detach the emulator runs free.
++//
++// If not called: StikDebug stays attached; this isn't fatal but wastes resources
++// and may interfere with other debugging tools.
++void Detach() noexcept;
++
++// True for exactly the duration of DualMappedRegion::Allocate()'s BreakGetJITMapping call on
++// this thread -- see ios_jit_allocator.cpp's g_expecting_jit_mapping_trap for why this exists.
++// Called from signals.cpp's SIGTRAP handler to distinguish a StikDebug-unserviced JIT-mapping
++// BRK trap (recoverable) from any other SIGTRAP (not).
++[[nodiscard]] bool IsExpectingJitMappingTrap() noexcept;
++
++} // namespace IosJitAllocator
++
++} // namespace Core
++
++#endif // defined(__APPLE__) && TARGET_OS_IPHONE
+diff --git a/src/core/libraries/font/fontft_internal.h b/src/core/libraries/font/fontft_internal.h
+index c9f788c1..34dd4974 100644
+--- a/src/core/libraries/font/fontft_internal.h
++++ b/src/core/libraries/font/fontft_internal.h
+@@ -109,10 +109,10 @@ namespace Libraries::Font::Internal {
+ struct alignas(16) LayoutWord {
+     std::array<u32, 4> words{};
+ 
+-    constexpr u8* data() {
++    u8* data() {
+         return reinterpret_cast<u8*>(words.data());
+     }
+-    constexpr const u8* data() const {
++    const u8* data() const {
+         return reinterpret_cast<const u8*>(words.data());
+     }
+ };
+diff --git a/src/emulator.cpp b/src/emulator.cpp
+index c4f41680..401f751d 100644
+--- a/src/emulator.cpp
++++ b/src/emulator.cpp
+@@ -1,6 +1,7 @@
+ // SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include <SDL3/SDL.h>
+ #include <algorithm>
+ #include <ctime>
+ #include <filesystem>
+@@ -17,6 +18,7 @@
+ #include "common/string_util.h"
+ #include "common/thread.h"
+ #include "core/emulator_settings.h"
++#include "core/debug_state.h"
+ #include "core/ipc/ipc.h"
+ #ifdef ENABLE_DISCORD_RPC
+ #include "common/discord_rpc_handler.h"
+@@ -32,6 +34,7 @@
+ #include "core/debugger.h"
+ #include "core/devtools/widget/module_list.h"
+ #include "core/emulator_settings.h"
++#include "core/debug_state.h"
+ #include "core/emulator_state.h"
+ #include "core/file_format/psf.h"
+ #include "core/file_format/trp.h"
+@@ -59,6 +62,13 @@
+ 
+ Frontend::WindowSDL* g_window = nullptr;
+ 
++#ifdef SHADPS4_LIBRARY_BUILD
++#define SHADPS4_TERMINATE_RUN(code) return
++#else
++#define SHADPS4_TERMINATE_RUN(code) std::quick_exit(code)
++#endif
++
++
+ namespace Libraries::Kernel {
+ extern char const* g_environment[64];
+ }
+@@ -78,7 +88,9 @@ Emulator::Emulator() {
+     WSADATA wsaData;
+     WSAStartup(versionWanted, &wsaData);
+ #endif
++#ifndef SHADPS4_LIBRARY_BUILD
+     std::at_quick_exit([]() { Common::Singleton<Core::Emulator>::Instance()->Shutdown(); });
++#endif
+ }
+ 
+ Emulator::~Emulator() {}
+@@ -280,6 +292,20 @@ void Emulator::Run(std::filesystem::path file, std::vector<std::string> args,
+                    std::optional<std::filesystem::path> p_game_folder,
+                    std::vector<std::pair<std::filesystem::path, std::string>> mounts,
+                    std::vector<std::string> const& env_vars, bool append_log) {
++    PrepareWindow(std::move(file), std::move(args), std::move(p_game_folder),
++                  std::move(mounts), env_vars, append_log);
++    if (!runtime_prepared) {
++        return;
++    }
++    RunLoop();
++}
++
++void Emulator::PrepareWindow(std::filesystem::path file, std::vector<std::string> args,
++                             std::optional<std::filesystem::path> p_game_folder,
++                             std::vector<std::pair<std::filesystem::path, std::string>> mounts,
++                             std::vector<std::string> const& env_vars, bool append_log) {
++    runtime_prepared = false;
++    pending_eboot_path.clear();
+     Common::SetCurrentThreadName("shadPS4:Main");
+     if (waitForDebuggerBeforeRun) {
+         Debugger::WaitForDebuggerAttach();
+@@ -605,6 +631,29 @@ void Emulator::Run(std::filesystem::path file, std::vector<std::string> args,
+         window->SetIcon({});
+     }
+ 
++
++    pending_game_id = id;
++    pending_eboot_path = guest_eboot_path;
++    pending_args = std::move(args);
++    pending_mounts = std::move(mounts);
++    pending_env_vars = env_vars;
++    runtime_prepared = true;
++
++}
++
++void Emulator::RunLoop() {
++    if (!runtime_prepared) {
++        LOG_ERROR(Loader, "RunLoop called before successful window preparation");
++        return;
++    }
++    runtime_prepared = false;
++    const std::string& id = pending_game_id;
++    const std::string guest_eboot_path = pending_eboot_path.string();
++    std::vector<std::string> args = std::move(pending_args);
++    auto mounts = std::move(pending_mounts);
++    const auto& env_vars = pending_env_vars;
++    auto* mnt = Common::Singleton<Core::FileSys::MntPoints>::Instance();
++    auto& game_info = Common::ElfInfo::Instance();
+     const auto& mount_data_dir = Common::FS::GetUserPath(Common::FS::PathType::GameDataDir);
+     mnt->Mount(mount_data_dir, "/data");
+ 
+@@ -677,8 +726,11 @@ void Emulator::Run(std::filesystem::path file, std::vector<std::string> args,
+     // Load the module with the linker.
+     if (linker->LoadModule(guest_eboot_path) == -1) {
+         LOG_CRITICAL(Loader, "Failed to load game's eboot.bin: {}", guest_eboot_path);
+-        std::quick_exit(0);
++        if (onRuntimeError) onRuntimeError("Failed to load game's eboot.bin");
++        if (onRuntimeStopped) onRuntimeStopped(-1);
++        SHADPS4_TERMINATE_RUN(0);
+     }
++    if (onRuntimeRunning) onRuntimeRunning();
+ 
+ #ifdef ENABLE_DISCORD_RPC
+     // Discord RPC
+@@ -708,7 +760,43 @@ void Emulator::Run(std::filesystem::path file, std::vector<std::string> args,
+         window->WaitEvent();
+     }
+ 
+-    std::quick_exit(0);
++    if (play_time_thread.joinable()) {
++        play_time_thread.request_stop();
++        play_time_thread.join();
++    }
++    if (onRuntimeStopped) onRuntimeStopped(0);
++    SHADPS4_TERMINATE_RUN(0);
++
++}
++
++void Emulator::Stop() {
++    SDL_Event event{};
++    event.type = SDL_EVENT_QUIT;
++    SDL_PushEvent(&event);
++}
++
++void Emulator::TogglePause() {
++    if (DebugState.IsGuestThreadsPaused()) {
++        DebugState.ResumeGuestThreads();
++    } else {
++        DebugState.PauseGuestThreads();
++    }
++}
++
++bool Emulator::IsPaused() const {
++    return DebugState.IsGuestThreadsPaused();
++}
++
++std::optional<std::filesystem::path>
++Emulator::TakePendingRestart(std::vector<std::string>& out_args) {
++    if (!pending_restart_path.has_value()) {
++        return std::nullopt;
++    }
++    auto path = std::move(*pending_restart_path);
++    pending_restart_path.reset();
++    out_args = std::move(pending_restart_args);
++    pending_restart_args.clear();
++    return path;
+ }
+ 
+ void Emulator::Restart(std::filesystem::path eboot_path,
+@@ -770,7 +858,25 @@ void Emulator::Restart(std::filesystem::path eboot_path,
+         }
+     }
+ 
++#ifdef SHADPS4_LIBRARY_BUILD
++    const auto separator = std::find(args.begin(), args.end(), "--");
++    std::vector<std::string> restart_args;
++    if (separator != args.end()) {
++        restart_args.assign(separator + 1, args.end());
++    }
++    const auto game_it = std::find(args.begin(), args.end(), "--game");
++    if (game_it == args.end() || std::next(game_it) == args.end()) {
++        if (onRuntimeError) onRuntimeError("Cannot restart: missing --game path");
++        Stop();
++        return;
++    }
++    pending_restart_path = std::filesystem::u8path(*std::next(game_it));
++    pending_restart_args = std::move(restart_args);
++    Stop();
++    return;
++#else
+     Relaunch(std::move(args));
++#endif
+ }
+ 
+ [[noreturn]] void Emulator::Relaunch(std::vector<std::string> args) {
+diff --git a/src/emulator.h b/src/emulator.h
+index 251fc138..f60f2e6f 100644
+--- a/src/emulator.h
++++ b/src/emulator.h
+@@ -4,6 +4,10 @@
+ #pragma once
+ 
+ #include <filesystem>
++#include <functional>
++#include <string_view>
++#include <string>
++#include <vector>
+ #include <optional>
+ #include <thread>
+ 
+@@ -30,6 +34,17 @@ public:
+              std::optional<std::filesystem::path> game_folder = {},
+              std::vector<std::pair<std::filesystem::path, std::string>> mounts = {},
+              std::vector<std::string> const& env_vars = {}, bool append_log = false);
++    void PrepareWindow(std::filesystem::path file, std::vector<std::string> args = {},
++                       std::optional<std::filesystem::path> game_folder = {},
++                       std::vector<std::pair<std::filesystem::path, std::string>> mounts = {},
++                       std::vector<std::string> const& env_vars = {}, bool append_log = false);
++    void RunLoop();
++    void Stop();
++    void TogglePause();
++    bool IsPaused() const;
++    std::optional<std::filesystem::path> TakePendingRestart(std::vector<std::string>& out_args);
++    Frontend::WindowSDL* GetWindow() const { return window.get(); }
++
+     void UpdatePlayTime(const std::string_view serial);
+     void Shutdown();
+ 
+@@ -57,6 +72,18 @@ private:
+     std::unique_ptr<Frontend::WindowSDL> window;
+     std::chrono::steady_clock::time_point start_time;
+     std::jthread play_time_thread;
++
++    bool runtime_prepared = false;
++    std::string pending_game_id;
++    std::filesystem::path pending_eboot_path;
++    std::vector<std::string> pending_args;
++    std::vector<std::pair<std::filesystem::path, std::string>> pending_mounts;
++    std::vector<std::string> pending_env_vars;
++    std::optional<std::filesystem::path> pending_restart_path;
++    std::vector<std::string> pending_restart_args;
++    std::function<void()> onRuntimeRunning;
++    std::function<void(std::string_view)> onRuntimeError;
++    std::function<void(int)> onRuntimeStopped;
+ };
+ 
+ } // namespace Core
+diff --git a/src/imgui/notifications_layer.cpp b/src/imgui/notifications_layer.cpp
+index e822610c..d6afa628 100644
+--- a/src/imgui/notifications_layer.cpp
++++ b/src/imgui/notifications_layer.cpp
+@@ -7,6 +7,7 @@
+ 
+ #include "imgui/imgui_std.h"
+ #include "notifications_layer.h"
++#include <optional>
+ 
+ CMRC_DECLARE(res);
+ namespace shadNotifications {
+diff --git a/src/platform/ios/shadps4_ios_api.cpp b/src/platform/ios/shadps4_ios_api.cpp
+new file mode 100644
+index 00000000..8f7cfd2d
+--- /dev/null
++++ b/src/platform/ios/shadps4_ios_api.cpp
+@@ -0,0 +1,300 @@
++// SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#include "platform/ios/shadps4_ios_api.h"
++
++#include <algorithm>
++#include <cstring>
++#include <filesystem>
++#include <mutex>
++#include <string>
++#include <string_view>
++
++#include <SDL3/SDL_properties.h>
++#include <SDL3/SDL_video.h>
++
++#include "common/boot_timer.h"
++#include "common/frame_presented_flag.h"
++#include "common/key_manager.h"
++#include "common/logging/log.h"
++#include "common/path_util.h"
++#include "common/sigsys_trap.h"
++#include "common/singleton.h"
++#include "core/emulator_settings.h"
++#include "core/emulator_state.h"
++#include "core/file_sys/fs.h"
++#include "core/ios/ios_jit_allocator.h"
++#include "core/ipc/ipc.h"
++#include "core/libraries/pad/pad.h"
++#include "core/loader/elf.h"
++#include "core/user_settings.h"
++#include "emulator.h"
++#include "input/controller.h"
++#include "shader_recompiler/ir/passes/srt.h"
++
++namespace {
++
++std::once_flag g_init_flag;
++bool g_init_ok = false;
++
++// Mirrors main.cpp's "resolve a path or a game ID" behavior (see FindGameByID usage
++// there): try the string as a literal path first, then search EmulatorSettings'
++// configured install directories for a matching game ID.
++std::optional<std::filesystem::path> ResolveEbootPath(std::string_view game_path_or_id) {
++    std::filesystem::path candidate(game_path_or_id);
++    if (std::filesystem::exists(candidate)) {
++        return candidate;
++    }
++    constexpr int max_depth = 5;
++    for (const auto& install_dir : EmulatorSettings.GetGameInstallDirs()) {
++        if (auto found = Common::FS::FindGameByID(install_dir, std::string(game_path_or_id),
++                                                    max_depth)) {
++            return found;
++        }
++    }
++    return std::nullopt;
++}
++
++} // namespace
++
++extern "C" int shadps4_init(const ShadPS4Options* options) {
++    std::call_once(g_init_flag, [&] {
++        Common::InstallBachataSigsysTrap();
++
++        // SetUserPath requires the directory to already exist (see path_util.cpp) --
++        // std::filesystem::create_directories is a no-op if it's already there.
++        if (options && options->user_dir && options->user_dir[0] != '\0') {
++            std::error_code ec;
++            std::filesystem::create_directories(options->user_dir, ec);
++            if (!ec) {
++                Common::FS::SetUserPath(Common::FS::PathType::UserDir, options->user_dir);
++            }
++        }
++
++        Common::Log::Setup("shadps4.log");
++
++        IPC::Instance().Init();
++
++        auto emu_state = std::make_shared<EmulatorState>();
++        EmulatorState::SetInstance(emu_state);
++        UserSettings.Load();
++
++        auto key_manager = KeyManager::GetInstance();
++        key_manager->LoadFromFile();
++
++        auto emu_settings = std::make_shared<EmulatorSettingsImpl>();
++        EmulatorSettingsImpl::SetInstance(emu_settings);
++        emu_settings->Load();
++        Common::Log::g_should_append |= EmulatorSettings.IsLogAppend();
++
++        if (options) {
++            if (options->show_fps) {
++                EmulatorSettings.SetShowFpsCounter(true);
++            }
++            if (options->fullscreen == 0) {
++                EmulatorSettings.SetFullScreen(false);
++            } else if (options->fullscreen == 1) {
++                EmulatorSettings.SetFullScreen(true);
++            }
++            if (options->network_enabled) {
++                EmulatorSettings.SetShadNetEnabled(true);
++                EmulatorSettings.SetConnectedToNetwork(true);
++            }
++        }
++
++        g_init_ok = true;
++    });
++    return g_init_ok ? 0 : -1;
++}
++
++namespace {
++
++int PrepareWindowImpl(const char* eboot_path, std::vector<std::string> args) {
++    if (!g_init_ok || !eboot_path) {
++        return -1;
++    }
++
++    auto resolved = ResolveEbootPath(eboot_path);
++    if (!resolved.has_value()) {
++        LOG_ERROR(Loader, "shadps4_prepare_window: game ID or file path not found: {}",
++                  eboot_path);
++        return -1;
++    }
++
++    Core::Loader::Elf executable;
++    executable.Open(*resolved);
++    if (!executable.IsElfFile()) {
++        LOG_ERROR(Loader, "shadps4_prepare_window: invalid PS4 executable: {}",
++                  resolved->string());
++        return -1;
++    }
++
++    auto* emulator = Common::Singleton<Core::Emulator>::Instance();
++    emulator->executableName = "AetherPS4";
++    emulator->PrepareWindow(*resolved, std::move(args));
++    // As early as possible, before any guest code runs at all -- see WarmUpIosSrtCodePool's
++    // own comment (srt.h) for why lazy, on-first-shader-use initialization was too late: by
++    // then StikDebug had already stopped responding to JIT-mapping requests on-device, every
++    // time this was actually tested.
++    Shader::WarmUpIosSrtCodePool();
++    return 0;
++}
++
++} // namespace
++
++extern "C" int shadps4_prepare_window(const char* eboot_path) {
++    return PrepareWindowImpl(eboot_path, {});
++}
++
++extern "C" int shadps4_prepare_window_with_args(const char* eboot_path,
++                                                const char* args_joined_by_newline) {
++    std::vector<std::string> args;
++    if (args_joined_by_newline && args_joined_by_newline[0] != '\0') {
++        std::string_view remaining(args_joined_by_newline);
++        while (!remaining.empty()) {
++            const auto pos = remaining.find('\n');
++            args.emplace_back(remaining.substr(0, pos));
++            if (pos == std::string_view::npos) {
++                break;
++            }
++            remaining.remove_prefix(pos + 1);
++        }
++    }
++    return PrepareWindowImpl(eboot_path, std::move(args));
++}
++
++extern "C" int shadps4_run_loop(void) {
++    if (!g_init_ok) {
++        return -1;
++    }
++    // Gap between this and PrepareWindow's own "done" checkpoint covers Swift's own overlay
++    // window setup plus the main-thread -> background-thread handoff latency (see
++    // EmulatorProcess.swift's continueLaunch) -- part of the same boot-timing investigation
++    // as the BACHATA_BOOT_TIMING checkpoints in emulator.cpp/linker.cpp.
++    LOG_CRITICAL(Core, "BACHATA_BOOT_TIMING: shadps4_run_loop entered at {}ms",
++                Common::BootElapsedMs());
++    auto* emulator = Common::Singleton<Core::Emulator>::Instance();
++    // RunLoop() blocks until the SDL window closes or shadps4_stop() pushes a quit event
++    // (see emulator.cpp); SHADPS4_LIBRARY_BUILD makes it return here instead of
++    // quick_exit()-ing the host process.
++    emulator->RunLoop();
++    return 0;
++}
++
++extern "C" int shadps4_take_pending_restart(char* path_buf, int path_buf_size, char* args_buf,
++                                            int args_buf_size) {
++    if (!g_init_ok || path_buf == nullptr || path_buf_size <= 0) {
++        return 0;
++    }
++    auto* emulator = Common::Singleton<Core::Emulator>::Instance();
++    std::vector<std::string> args;
++    auto path = emulator->TakePendingRestart(args);
++    if (!path.has_value()) {
++        return 0;
++    }
++    const auto utf8 = Common::FS::PathToUTF8String(*path);
++    const auto copy_length = std::min(utf8.size(), static_cast<std::size_t>(path_buf_size) - 1);
++    std::memcpy(path_buf, utf8.data(), copy_length);
++    path_buf[copy_length] = '\0';
++
++    if (args_buf != nullptr && args_buf_size > 0) {
++        // Same newline-joined encoding shadps4_prepare_window_with_args splits on. Guest args
++        // aren't expected to contain literal newlines; if one somehow did, it'd just be
++        // misparsed as an extra arg boundary, not a crash.
++        std::string joined;
++        for (const auto& arg : args) {
++            if (!joined.empty()) {
++                joined += '\n';
++            }
++            joined += arg;
++        }
++        const auto args_copy_length =
++            std::min(joined.size(), static_cast<std::size_t>(args_buf_size) - 1);
++        std::memcpy(args_buf, joined.data(), args_copy_length);
++        args_buf[args_copy_length] = '\0';
++    }
++    return 1;
++}
++
++extern "C" int shadps4_run(const char* eboot_path) {
++    if (shadps4_prepare_window(eboot_path) != 0) {
++        return -1;
++    }
++    return shadps4_run_loop();
++}
++
++extern "C" void shadps4_stop() {
++    if (!g_init_ok) {
++        return;
++    }
++    Common::Singleton<Core::Emulator>::Instance()->Stop();
++}
++
++extern "C" void shadps4_toggle_pause() {
++    if (!g_init_ok) {
++        return;
++    }
++    Common::Singleton<Core::Emulator>::Instance()->TogglePause();
++}
++
++extern "C" int shadps4_is_paused() {
++    if (!g_init_ok) {
++        return 0;
++    }
++    return Common::Singleton<Core::Emulator>::Instance()->IsPaused() ? 1 : 0;
++}
++
++extern "C" int shadps4_has_presented_frame() {
++    return Common::FramePresentedFlag().load(std::memory_order_relaxed) ? 1 : 0;
++}
++
++extern "C" uint64_t shadps4_get_presented_frame_count() {
++    return Common::PresentedFrameCount().load(std::memory_order_relaxed);
++}
++
++extern "C" void shadps4_register_first_frame_callback(void (*callback)(void)) {
++    Common::FramePresentedCallback().store(callback, std::memory_order_relaxed);
++}
++
++extern "C" int shadps4_probe_jit() {
++    // A page's worth is the smallest size the underlying protocol handles cleanly;
++    // this is purely a functional probe, the region is released immediately either way.
++    auto region = Core::DualMappedRegion::Allocate(4096);
++    const bool ok = region.IsValid();
++    region.Release();
++    return ok ? 1 : 0;
++}
++
++extern "C" void* shadps4_get_uikit_window() {
++    if (!g_init_ok) {
++        return nullptr;
++    }
++    auto* emulator = Common::Singleton<Core::Emulator>::Instance();
++    auto* window = emulator->GetWindow();
++    if (window == nullptr) {
++        return nullptr;
++    }
++    auto* sdl_window = window->GetSDLWindow();
++    if (sdl_window == nullptr) {
++        return nullptr;
++    }
++    return SDL_GetPointerProperty(SDL_GetWindowProperties(sdl_window),
++                                  SDL_PROP_WINDOW_UIKIT_WINDOW_POINTER, nullptr);
++}
++
++extern "C" void shadps4_apply_touch_input(uint32_t buttons, int left_x, int left_y, int right_x,
++                                          int right_y, int l2, int r2) {
++    if (!g_init_ok) {
++        return;
++    }
++    // Same primary-controller slot a real physical controller occupies (player_index - 1
++    // for the default/only user), not a separate "extra" one -- see
++    // touch_controls_layer.cpp's own kTouchControllerSlot comment for why: slot 4 is
++    // reserved for ORBIS_PAD_PORT_TYPE_REMOTE_CONTROL-type pads specifically, and using it
++    // meant every touch was updating a GameController the game was never looking at.
++    constexpr size_t kTouchControllerSlot = 0;
++    auto* controllers = Common::Singleton<Input::GameControllers>::Instance();
++    const std::array<int, 6> axes = {left_x, left_y, right_x, right_y, l2, r2};
++    (*controllers)[kTouchControllerSlot]->ApplyRemoteState(
++        static_cast<Libraries::Pad::OrbisPadButtonDataOffset>(buttons), axes, false, 0.0f, 0.0f);
++}
+diff --git a/src/platform/ios/shadps4_ios_api.h b/src/platform/ios/shadps4_ios_api.h
+new file mode 100644
+index 00000000..a7cf1434
+--- /dev/null
++++ b/src/platform/ios/shadps4_ios_api.h
+@@ -0,0 +1,203 @@
++// SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#pragma once
++
++#include <stdint.h>
++
++// Plain C ABI for embedding shadps4 into a host app process (the standalone AetherPS4
++// iOS app; potentially other Swift hosts later) instead of running it as the `shadps4`
++// CLI executable. Built as the `shadps4_ios` CMake target (SHADPS4_LIBRARY_BUILD),
++// which compiles the same emulator/core sources as the CLI target with src/main.cpp's
++// CLI/process-lifetime responsibilities replaced by these entry points; see
++// src/platform/ios/shadps4_ios_api.cpp for what each call actually does.
++//
++// The standalone app lets SDL3 own the window and its own input/event handling (see
++// PORTING plan, Phase 1 context) exactly as it already does on the desktop build, so
++// there is no separate input API here for v1 -- gamepad/touch input flows through SDL's
++// normal event pump once shadps4_run() creates the window.
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++typedef struct ShadPS4Options {
++    // Overrides the user data directory (settings, saves, logs, etc). Must be
++    // writable. Pass the app's Application Support / Documents directory on iOS.
++    const char* user_dir;
++    int show_fps;       // 0/1
++    int fullscreen;     // -1 = leave at whatever EmulatorSettings already has, 0 = false, 1 = true
++    int network_enabled; // 0/1 - enable network (ShadNet + system network)
++} ShadPS4Options;
++
++// Performs one-time engine bring-up (IPC, EmulatorState, UserSettings, KeyManager,
++// EmulatorSettingsImpl). Must be called exactly once, before shadps4_run(), from the
++// app's main thread during launch. Returns 0 on success.
++int shadps4_init(const ShadPS4Options* options);
++
++// Resolves eboot_path (an absolute path, or a game ID to search EmulatorSettings'
++// configured install directories) and runs the emulator, blocking until the game
++// exits or shadps4_stop() is called. MUST be called from the app's main thread: SDL's
++// Cocoa/UIKit video backend creates and owns the window/event loop for the duration of
++// this call (matching the desktop build's Frontend::WindowSDL usage), and Apple's
++// windowing frameworks require that on the main thread -- calling this from a
++// background thread fails during SDL video subsystem init. Returns 0 on a normal exit.
++//
++// Implemented as shadps4_prepare_window() + shadps4_run_loop() back-to-back on the
++// calling thread -- kept as a single call for callers that don't need (or can't use) the
++// split below, e.g. anything not willing to hand the game session off to a second thread.
++int shadps4_run(const char* eboot_path);
++
++// The split version of shadps4_run(), for a host that wants its own main thread free for
++// normal UI work (SwiftUI, Timers, etc.) for the whole game session instead of just until
++// the window exists. shadps4_prepare_window() does the same UIKit-touching setup
++// shadps4_run() used to block the WHOLE session for, but returns as soon as the window is
++// created -- still MUST be called from the app's main thread, same reason as shadps4_run()
++// above. Returns 0 on success; on failure no window was created and shadps4_run_loop()
++// must not be called.
++int shadps4_prepare_window(const char* eboot_path);
++
++// Same as shadps4_prepare_window(), but also passes guest argv entries through to the new
++// game's entry point -- args_joined_by_newline is a single string with each argument
++// separated by '\n' (an empty string means no args, same as calling shadps4_prepare_window()
++// directly). Needed for resuming after a restart request (see shadps4_take_pending_restart()
++// below): sceSystemServiceLoadExec's caller supplies its own argv, and on real hardware
++// those are what tell the newly-loaded image to resume mid-story instead of booting cold --
++// discarding them was confirmed on-device to drop the player back at the game's main menu
++// instead of continuing.
++int shadps4_prepare_window_with_args(const char* eboot_path, const char* args_joined_by_newline);
++
++// Runs the actual game session (starts guest execution, then blocks in SDL's event loop
++// until the game exits or shadps4_stop() is called) -- everything shadps4_prepare_window()
++// didn't already do. Safe to call from a background thread: by this point the window and
++// every other UIKit object involved already exist, SDL's own event queue is thread-safe by
++// design (built to support exactly this -- input delivered on the main thread's run loop,
++// consumed from another), and nothing left in this call touches UIKit directly. This is
++// what actually frees the main thread: call this from a dedicated background thread (not
++// DispatchQueue.global(), which doesn't guarantee it stays on the same OS thread this
++// blocks for the whole session) right after shadps4_prepare_window() succeeds on the main
++// thread, and the app's own SwiftUI/UIKit content keeps working normally for the entire
++// game session. Returns 0 on a normal exit.
++int shadps4_run_loop(void);
++
++// Call once, right after shadps4_run_loop() returns, to distinguish a game requesting an
++// in-process restart (sceSystemServiceLoadExec -- e.g. a chapter/level transition) from a
++// normal exit. iOS can't fork()/exec() a new process the way every other platform's
++// Emulator::Restart() does (see its own comment); instead the new eboot path/args are handed
++// back here for the host to relaunch with, the same way it launched the first game, rather
++// than the whole app quick_exit()-ing the way an unhandled fork() failure otherwise would.
++//
++// Returns 1 and fills path_buf and args_buf (both NUL-terminated, each truncated to its own
++// buf_size if needed) if a restart was requested; returns 0 (both buffers untouched)
++// otherwise -- a normal exit. args_buf receives the guest's argv entries joined by '\n' (see
++// shadps4_prepare_window_with_args()'s own comment for the encoding and why these matter);
++// pass args_buf_size 0 (with args_buf possibly nullptr) to skip retrieving them if a caller
++// only cares about the path.
++int shadps4_take_pending_restart(char* path_buf, int path_buf_size, char* args_buf,
++                                 int args_buf_size);
++
++// Requests that a currently-running shadps4_run() call (on the main thread) return.
++// Safe to call from any other thread, e.g. from a UI "stop" button's handler while
++// shadps4_run() blocks the main thread.
++void shadps4_stop(void);
++
++// Toggles guest-thread pause. Safe to call from any thread.
++void shadps4_toggle_pause(void);
++
++// Returns non-zero if guest threads are currently paused.
++int shadps4_is_paused(void);
++
++// Returns non-zero once the Vulkan presenter has successfully presented at least one
++// real frame since shadps4_init() (never resets to 0 again, even across game restarts
++// within the same process). Intended for a host UI's boot loading screen to know when
++// to dismiss itself in favor of actual game video, rather than guessing with a timeout.
++// Safe to call from any thread.
++int shadps4_has_presented_frame(void);
++
++// Total number of successful swapchain presents so far in this process, monotonically
++// increasing (never resets, even across game restarts within the same process -- same
++// lifetime as shadps4_has_presented_frame's flag). A host UI can sample this on a timer and
++// divide the delta by elapsed wall time to compute a live FPS reading. Safe to call from
++// any thread.
++uint64_t shadps4_get_presented_frame_count(void);
++
++// Registers a callback invoked exactly once, synchronously, the instant the Vulkan
++// presenter completes its first real swapchain present -- on the presenter's own render
++// thread, NOT necessarily the thread that registered it and NOT necessarily the main
++// thread, so a Swift/UIKit host must still hop to the main thread itself before touching
++// any UI from inside the callback. Pushed rather than polled: a host UI's boot loading
++// screen can dismiss itself the moment this fires instead of sampling
++// shadps4_has_presented_frame() on a timer. Must be called before shadps4_run(). Passing
++// nullptr clears any previously registered callback.
++void shadps4_register_first_frame_callback(void (*callback)(void));
++
++// Probes whether the JIT-granting protocol actually works right now: allocates a
++// minimal dual-mapped JIT region (see core/ios/ios_jit_allocator.h) and immediately
++// releases it. That allocation only succeeds if an external debugger (StikDebug) is
++// attached AND is actively running the JIT script to service the BRK-trap handshake --
++// unlike just checking whether *some* debugger is attached, this exercises the real
++// end-to-end path the emulator itself depends on for JIT memory. Independent of
++// shadps4_init()/shadps4_run() -- safe (and intended) to call before either, e.g. from
++// a host UI's one-time setup check at launch. Returns non-zero on success.
++//
++// CALLER MUST confirm a debugger is actually attached (e.g. Swift's checkDebugged(),
++// which only inspects the process's own codesign/csops state and never touches the
++// BRK path) before calling this. The BRK instruction this triggers is unconditional --
++// with no debugger attached to service it, it raises a raw, unhandled SIGTRAP that
++// terminates the process outright, not a graceful failure (confirmed on-device; see
++// fex_guest_engine.cpp's "Do NOT detach the debugger here" comment for the same
++// failure mode hit via a different call site). Calling this blind, before any
++// attachment check, WILL crash the app when StikDebug isn't attached.
++int shadps4_probe_jit(void);
++
++// Returns the raw UIWindow* SDL created for the currently-running game (as an untyped
++// pointer, so this header stays C/Objective-C-agnostic; bridge it back with
++// `(__bridge UIWindow *)` or Swift's `Unmanaged<UIWindow>.fromOpaque(...).takeUnretainedValue()`
++// on the caller side), or NULL if no game is running. SDL creates this window itself --
++// it is a separate UIWindow from whatever hosts the app's own SwiftUI content, not a view
++// inside it -- so a host UI that wants native controls visible over gameplay must add them
++// as a subview of THIS window (or of its rootViewController's view), not of its own
++// window, since a second independent UIWindow was already confirmed on-device not to
++// repaint reliably once shadps4_run() takes the main thread's SDL run loop (see
++// mobile_overlay.h's header comment for that history). Only meaningful once SDL's window
++// actually exists -- call this from a shadps4_register_first_frame_callback() callback (or
++// later), not before shadps4_run() starts. Must be called from the main thread, same as
++// every other UIKit-touching call in this API.
++void* shadps4_get_uikit_window(void);
++
++// Button bit values match Libraries::Pad::OrbisPadButtonDataOffset exactly (kept in sync by
++// hand: a C header can't reference that C++ enum class directly). OR these together and
++// pass as `buttons` to shadps4_apply_touch_input below.
++#define SHADPS4_PAD_SHARE    0x1
++#define SHADPS4_PAD_L3       0x2
++#define SHADPS4_PAD_R3       0x4
++#define SHADPS4_PAD_OPTIONS  0x8
++#define SHADPS4_PAD_UP       0x10
++#define SHADPS4_PAD_RIGHT    0x20
++#define SHADPS4_PAD_DOWN     0x40
++#define SHADPS4_PAD_LEFT     0x80
++#define SHADPS4_PAD_L2       0x100
++#define SHADPS4_PAD_R2       0x200
++#define SHADPS4_PAD_L1       0x400
++#define SHADPS4_PAD_R1       0x800
++#define SHADPS4_PAD_TRIANGLE 0x1000
++#define SHADPS4_PAD_CIRCLE   0x2000
++#define SHADPS4_PAD_CROSS    0x4000
++#define SHADPS4_PAD_SQUARE   0x8000
++#define SHADPS4_PAD_TOUCHPAD 0x100000
++
++// Applies a full touch-controller state snapshot, replacing whatever the touch overlay
++// last reported -- not incremental, so the caller must pass the complete current state
++// every call (all currently-held buttons OR'd together, not just what changed). Axis
++// values are 0-255; 128 is center for left_x/left_y/right_x/right_y, 0 is released for
++// l2/r2. Routes through the same Input::GameControllers::ApplyRemoteState() path a network
++// remote-play controller uses, on the primary controller's own slot (the same one a real
++// physical controller occupies). Safe to call from any thread, including SwiftUI's normal
++// main-thread gesture callbacks, as often as needed (e.g. every touch-move event) -- a
++// no-op before shadps4_prepare_window() has succeeded.
++void shadps4_apply_touch_input(uint32_t buttons, int left_x, int left_y, int right_x,
++                                int right_y, int l2, int r2);
++
++#ifdef __cplusplus
++}
++#endif
+diff --git a/src/sdl_window.cpp b/src/sdl_window.cpp
+index a7d36502..ef45fca0 100644
+--- a/src/sdl_window.cpp
++++ b/src/sdl_window.cpp
+@@ -177,7 +177,7 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, Input::GameControllers* controller
+         window_info.render_surface = SDL_GetPointerProperty(
+             SDL_GetWindowProperties(window), SDL_PROP_WINDOW_WAYLAND_SURFACE_POINTER, NULL);
+     }
+-#elif defined(SDL_PLATFORM_MACOS)
++#elif defined(SDL_PLATFORM_MACOS) || defined(SDL_PLATFORM_IOS)
+     window_info.type = WindowSystemType::Metal;
+     window_info.render_surface = SDL_Metal_GetLayer(SDL_Metal_CreateView(window));
+ #endif
+diff --git a/src/shader_recompiler/ir/passes/flatten_extended_userdata_pass.cpp b/src/shader_recompiler/ir/passes/flatten_extended_userdata_pass.cpp
+index 67d361a8..b68cc83e 100644
+--- a/src/shader_recompiler/ir/passes/flatten_extended_userdata_pass.cpp
++++ b/src/shader_recompiler/ir/passes/flatten_extended_userdata_pass.cpp
+@@ -1,6 +1,28 @@
+ // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include <array>
++#include <atomic>
++#include <cerrno>
++#include <cstring>
++#include <memory>
++#include <mutex>
++#include <vector>
++#ifdef __APPLE__
++#include <TargetConditionals.h>
++#endif
++#if defined(ARCH_ARM64) && (defined(__linux__) || (defined(__APPLE__) && TARGET_OS_IPHONE))
++#include <sys/mman.h>
++#if defined(__linux__)
++#include <sys/ucontext.h>
++#include <unistd.h>
++#else
++#define _XOPEN_SOURCE 1
++#include <ucontext.h>
++#include <mach/arm/thread_status.h>
++#include "core/ios/ios_jit_allocator.h"
++#endif
++#endif
+ #include <unordered_map>
+ #include <boost/container/flat_map.hpp>
+ #include <queue>
+@@ -860,6 +882,464 @@ void FlattenExtendedUserdataPass(IR::Program& program) {
+ 
+ } // namespace Shader::Optimization
+ 
++#elif defined(ARCH_ARM64) && (defined(__linux__) || (defined(__APPLE__) && TARGET_OS_IPHONE))
++
++namespace {
++
++constexpr u32 Arm64MovX2X0 = 0xaa0003e2;
++constexpr u32 Arm64PushX2 = 0xf81f0fe2;
++constexpr u32 Arm64PopX2 = 0xf84107e2;
++constexpr u32 Arm64LoadPointer = 0xf8646842;
++constexpr u32 Arm64MaskPointer = 0xd340bc42;
++constexpr u32 Arm64LoadDataRegisterOffset = 0xb8646843;
++constexpr u32 Arm64StoreDataRegisterOffset = 0xb8256823;
++constexpr u32 Arm64Ret = 0xd65f03c0;
++constexpr size_t MaxSrtCodeRanges = 32768;
++
++struct SrtCodeRange {
++    uintptr_t begin{};
++    uintptr_t end{};
++};
++
++#if defined(__APPLE__) && TARGET_OS_IPHONE
++// iOS can't flip a single mapping between writable and executable (no W^X toggle available
++// to a sideloaded app) -- Core::DualMappedRegion gives two separate virtual addresses backed
++// by the same physical pages instead, matching the pattern used everywhere else this port
++// needs to generate and run code at runtime (see core/ios/ios_jit_allocator.h). Its own
++// destructor already releases both mappings, so this struct needs nothing beyond the member.
++// Only used for the pool-exhausted fallback below -- the normal path shares one long-lived
++// pool region across every walker instead of giving each its own SrtCodeMapping.
++struct SrtCodeMapping {
++    Core::DualMappedRegion region;
++};
++
++// Confirmed on-device: DualMappedRegion::Allocate() -- BreakGetJITMapping's underlying BRK
++// trap -- needs StikDebug actually responsive to service it, and StikDebug can be killed
++// mid-session by iOS's own background wake-rate limiter. RegisterWalkerCode used to call
++// Allocate() once per *distinct* shader needing an SRT walker, on demand throughout gameplay
++// -- one small (tens-of-bytes) request per shader, but each one is a fresh StikDebug
++// interaction, and interactions are exactly what iOS is rate-limiting. A single game reaching
++// enough distinct shaders exhausted that budget and crashed here (signals.cpp's SIGTRAP
++// recovery and this file's own retry-before-giving-up in ios_jit_allocator.cpp both help the
++// individual request fail safely, but neither stops StikDebug from being gone for the rest of
++// the session once it's actually killed).
++//
++// Pool one large region up front instead -- mirroring the ARCH_X86_64 host path just above
++// (a single static 32MB Xbyak::CodeGenerator, sub-allocated via getCurr()/db() per walker) --
++// so a whole session's worth of walkers costs exactly one StikDebug interaction, made as early
++// as the very first shader needs one, rather than one interaction per distinct shader spread
++// across the whole session. 1MB comfortably covers many thousands of these (each walker seen
++// on-device so far has been well under 200 bytes). Falls back to the old per-walker Allocate()
++// path if the pool is ever actually exhausted, or failed to initialize in the first place.
++class IosSrtCodePool final {
++public:
++    static IosSrtCodePool& Instance() {
++        static IosSrtCodePool pool;
++        return pool;
++    }
++
++    // Returns {rw, rx} inside the pool on success, or {nullptr, nullptr} if the pool never
++    // initialized or genuinely has no room left (caller falls back to a standalone
++    // DualMappedRegion::Allocate() in either case).
++    std::pair<u8*, u8*> TryAllocate(size_t size) {
++        if (!region.IsValid()) {
++            return {nullptr, nullptr};
++        }
++        const size_t offset = used.fetch_add(size, std::memory_order_relaxed);
++        if (offset + size > region.size) {
++            // Give back what this call claimed but can't use -- a later, smaller request
++            // might still fit behind it, though once the pool is this full that's unlikely
++            // to matter much either way.
++            used.fetch_sub(size, std::memory_order_relaxed);
++            return {nullptr, nullptr};
++        }
++        return {region.rw_addr + offset, region.rx_addr + offset};
++    }
++
++private:
++    static constexpr size_t kPoolSize = 1_MB;
++
++    IosSrtCodePool() : region(Core::DualMappedRegion::Allocate(kPoolSize)) {
++        if (!region.IsValid()) {
++            LOG_CRITICAL(Render_Recompiler,
++                        "IosSrtCodePool: initial {}-byte pool allocation failed; every SRT "
++                        "walker this session will fall back to a standalone JIT request",
++                        kPoolSize);
++        }
++    }
++
++    Core::DualMappedRegion region;
++    std::atomic_size_t used{0};
++};
++#else
++struct SrtCodeMapping {
++    u8* data{};
++    size_t size{};
++
++    ~SrtCodeMapping() {
++        if (data != nullptr) {
++            munmap(data, size);
++        }
++    }
++};
++#endif
++
++std::array<SrtCodeRange, MaxSrtCodeRanges> g_srt_code_ranges{};
++std::atomic_size_t g_srt_code_range_count{};
++std::mutex g_srt_code_mutex;
++std::vector<std::unique_ptr<SrtCodeMapping>> g_srt_code_mappings;
++std::once_flag g_srt_signal_once;
++
++bool IsSrtCodeAddress(uintptr_t pc) {
++    const size_t count = g_srt_code_range_count.load(std::memory_order_acquire);
++    for (size_t index = 0; index < count; ++index) {
++        const auto& range = g_srt_code_ranges[index];
++        if (pc >= range.begin && pc < range.end) {
++            return true;
++        }
++    }
++    return false;
++}
++
++bool SrtWalkerSignalHandler(void* context, void* fault_address) {
++    const auto pc = reinterpret_cast<uintptr_t>(Common::GetRip(context));
++    if (!IsSrtCodeAddress(pc)) {
++        return false;
++    }
++
++    u32 instruction{};
++    std::memcpy(&instruction, reinterpret_cast<const void*>(pc), sizeof(instruction));
++#if defined(__APPLE__) && TARGET_OS_IPHONE
++    // General-purpose x-registers (unlike pc/sp/fp/lr) aren't pointer-authentication-opaque
++    // on Apple Silicon, so they're addressable directly through __x[] rather than needing
++    // the arm_thread_state64_get_*/set_* accessor macros (see sigsys_trap.cpp's equivalent
++    // direct __x[8]/__x[0..5] reads for the same reasoning).
++    auto* signal_context = static_cast<ucontext_t*>(context);
++    auto& ts = signal_context->uc_mcontext->__ss;
++    if (instruction == Arm64LoadPointer) {
++        ts.__x[2] = 0;
++    } else if ((instruction & 0xffc003ffu) == 0xb9400043u ||
++               instruction == Arm64LoadDataRegisterOffset) {
++        ts.__x[3] = 0;
++    } else {
++        return false;
++    }
++#else
++    auto* signal_context = static_cast<ucontext_t*>(context);
++    if (instruction == Arm64LoadPointer) {
++        signal_context->uc_mcontext.regs[2] = 0;
++    } else if ((instruction & 0xffc003ffu) == 0xb9400043u ||
++               instruction == Arm64LoadDataRegisterOffset) {
++        signal_context->uc_mcontext.regs[3] = 0;
++    } else {
++        return false;
++    }
++#endif
++    Common::IncrementRip(context, sizeof(u32));
++    return true;
++}
++
++bool IsArm64SrtWalker(const u8* ptr, size_t size) {
++    if (ptr == nullptr || size < sizeof(u32) * 2 || size % sizeof(u32) != 0) {
++        return false;
++    }
++    u32 first{};
++    u32 last{};
++    std::memcpy(&first, ptr, sizeof(first));
++    std::memcpy(&last, ptr + size - sizeof(last), sizeof(last));
++    return first == Arm64MovX2X0 && last == Arm64Ret;
++}
++
++class Arm64SrtEmitter {
++public:
++    void Begin() {
++        Emit(Arm64MovX2X0);
++    }
++
++    void PushPointer(u32 offset_dw) {
++        Emit(Arm64PushX2);
++        MoveImmediate(4, static_cast<u64>(offset_dw) * sizeof(u32));
++        Emit(Arm64LoadPointer);
++        Emit(Arm64MaskPointer);
++    }
++
++    void PopPointer() {
++        Emit(Arm64PopX2);
++    }
++
++    void CopyDword(u32 source_offset_dw, u32 destination_offset_dw) {
++        if (source_offset_dw <= 0xfff) {
++            Emit(0xb9400043u | (source_offset_dw << 10));
++        } else {
++            MoveImmediate(4, static_cast<u64>(source_offset_dw) * sizeof(u32));
++            Emit(Arm64LoadDataRegisterOffset);
++        }
++
++        if (destination_offset_dw <= 0xfff) {
++            Emit(0xb9000023u | (destination_offset_dw << 10));
++        } else {
++            MoveImmediate(5, static_cast<u64>(destination_offset_dw) * sizeof(u32));
++            Emit(Arm64StoreDataRegisterOffset);
++        }
++    }
++
++    void End() {
++        Emit(Arm64Ret);
++    }
++
++    const u8* Data() const {
++        return reinterpret_cast<const u8*>(code.data());
++    }
++
++    size_t Size() const {
++        return code.size() * sizeof(u32);
++    }
++
++private:
++    void Emit(u32 instruction) {
++        code.push_back(instruction);
++    }
++
++    void MoveImmediate(u32 reg, u64 value) {
++        Emit(0xd2800000u | reg | (static_cast<u32>(value & 0xffff) << 5));
++        for (u32 halfword = 1; halfword < 4; ++halfword) {
++            const u32 part = static_cast<u32>((value >> (halfword * 16)) & 0xffff);
++            if (part != 0) {
++                Emit(0xf2800000u | reg | (halfword << 21) | (part << 5));
++            }
++        }
++    }
++
++    std::vector<u32> code;
++};
++
++using namespace Shader;
++
++struct PassInfo {
++    using PtrUserList = boost::container::flat_map<u32, Shader::IR::Inst*>;
++
++    Optimization::SrtGvnTable gvn_table;
++    std::unordered_map<IR::Inst*, PtrUserList> pointer_uses;
++    boost::container::small_flat_map<IR::ScalarReg, IR::Inst*, 1> srt_roots;
++    std::unordered_map<u32, IR::Inst*> vn_to_inst;
++    u32 dst_off_dw;
++
++    PtrUserList* GetUsesAsPointer(IR::Inst* inst) {
++        auto it = pointer_uses.find(inst);
++        return it != pointer_uses.end() ? &it->second : nullptr;
++    }
++
++    IR::Inst* DeduplicateInstruction(IR::Inst* inst) {
++        auto it = vn_to_inst.try_emplace(gvn_table.GetValueNumber(inst), inst);
++        return it.first->second;
++    }
++};
++
++} // namespace
++
++namespace Shader {
++
++PFN_SrtWalker RegisterWalkerCode(const u8* ptr, size_t size) {
++    if (!IsArm64SrtWalker(ptr, size)) {
++        LOG_WARNING(Render_Recompiler,
++                    "Ignoring incompatible cached SRT walker; shader will be recompiled");
++        return nullptr;
++    }
++
++    std::lock_guard lock{g_srt_code_mutex};
++    const size_t range_index = g_srt_code_range_count.load(std::memory_order_relaxed);
++    if (range_index >= g_srt_code_ranges.size()) {
++        LOG_CRITICAL(Render_Recompiler, "ARM64 SRT walker range table is full");
++        std::abort();
++    }
++
++    std::unique_ptr<SrtCodeMapping> mapping;
++#if defined(__APPLE__) && TARGET_OS_IPHONE
++    // Pool first (one StikDebug interaction for the whole session, made as early as the first
++    // shader needing a walker -- see IosSrtCodePool's own comment for why); only fall back to
++    // a standalone per-walker request if the pool never initialized or is actually exhausted.
++    // Either way, rw_addr and rx_addr back the same physical pages, so writing through the
++    // former is immediately visible when later executed through the latter; both aliases
++    // still need their own cache maintenance (icache is fetched from rx_addr, dcache was
++    // dirtied at rw_addr -- one alias's invalidate does not cover the other's).
++    auto [rw_addr, rx_addr] = IosSrtCodePool::Instance().TryAllocate(size);
++    if (rw_addr == nullptr) {
++        mapping = std::make_unique<SrtCodeMapping>();
++        // Allocation, not "grant an address I already own" -- see ios_jit_allocator.h's top
++        // comment for why that second branch is a known-bad path this codebase avoids
++        // everywhere.
++        mapping->region = Core::DualMappedRegion::Allocate(size);
++        if (!mapping->region.IsValid()) {
++            LOG_CRITICAL(Render_Recompiler,
++                        "Unable to allocate ARM64 SRT walker (iOS dual-mapped JIT, pool "
++                        "exhausted or never initialized)");
++            std::abort();
++        }
++        rw_addr = mapping->region.rw_addr;
++        rx_addr = mapping->region.rx_addr;
++    }
++    std::memcpy(rw_addr, ptr, size);
++    __builtin___clear_cache(reinterpret_cast<char*>(rw_addr),
++                            reinterpret_cast<char*>(rw_addr + size));
++    __builtin___clear_cache(reinterpret_cast<char*>(rx_addr),
++                            reinterpret_cast<char*>(rx_addr + size));
++
++    const auto begin = reinterpret_cast<uintptr_t>(rx_addr);
++    auto* function = reinterpret_cast<PFN_SrtWalker>(rx_addr);
++#else
++    mapping = std::make_unique<SrtCodeMapping>();
++    const long page_size_result = sysconf(_SC_PAGESIZE);
++    if (page_size_result <= 0) {
++        LOG_CRITICAL(Render_Recompiler, "Unable to query host page size for ARM64 SRT walker");
++        std::abort();
++    }
++    const size_t page_size = static_cast<size_t>(page_size_result);
++    const size_t mapping_size = (size + page_size - 1) & ~(page_size - 1);
++    mapping->data = static_cast<u8*>(
++        mmap(nullptr, mapping_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
++    mapping->size = mapping_size;
++    if (mapping->data == MAP_FAILED) {
++        mapping->data = nullptr;
++        LOG_CRITICAL(Render_Recompiler, "Unable to allocate ARM64 SRT walker: errno {}", errno);
++        std::abort();
++    }
++    std::memcpy(mapping->data, ptr, size);
++    __builtin___clear_cache(reinterpret_cast<char*>(mapping->data),
++                            reinterpret_cast<char*>(mapping->data + size));
++    if (mprotect(mapping->data, mapping_size, PROT_READ | PROT_EXEC) != 0) {
++        LOG_CRITICAL(Render_Recompiler, "Unable to protect ARM64 SRT walker: errno {}", errno);
++        std::abort();
++    }
++
++    const auto begin = reinterpret_cast<uintptr_t>(mapping->data);
++    auto* function = reinterpret_cast<PFN_SrtWalker>(mapping->data);
++#endif
++
++    std::call_once(g_srt_signal_once, [] {
++        constexpr u32 priority = 1;
++        Core::Signals::Instance()->RegisterAccessViolationHandler(SrtWalkerSignalHandler, priority);
++    });
++
++    // mapping is null when IosSrtCodePool served this request -- the pool itself is a
++    // process-lifetime static, so there's nothing per-walker left to own here.
++    if (mapping != nullptr) {
++        g_srt_code_mappings.push_back(std::move(mapping));
++    }
++    g_srt_code_ranges[range_index] = {begin, begin + size};
++    g_srt_code_range_count.store(range_index + 1, std::memory_order_release);
++    return function;
++}
++
++#if defined(__APPLE__) && TARGET_OS_IPHONE
++void WarmUpIosSrtCodePool() {
++    IosSrtCodePool::Instance();
++}
++#else
++void WarmUpIosSrtCodePool() {}
++#endif
++
++} // namespace Shader
++
++namespace Shader::Optimization {
++
++namespace {
++
++void VisitPointer(u32 offset_dw, IR::Inst* subtree, PassInfo& pass_info,
++                  Arm64SrtEmitter& emitter) {
++    emitter.PushPointer(offset_dw);
++    PassInfo::PtrUserList* use_list = pass_info.GetUsesAsPointer(subtree);
++    ASSERT(use_list);
++
++    for (auto [source_offset_dw, use] : *use_list) {
++        emitter.CopyDword(source_offset_dw, pass_info.dst_off_dw);
++        use->SetFlags<u32>(pass_info.dst_off_dw++);
++    }
++
++    for (const auto [source_offset_dw, use] : *use_list) {
++        if (pass_info.GetUsesAsPointer(use)) {
++            VisitPointer(source_offset_dw, use, pass_info, emitter);
++        }
++    }
++    emitter.PopPointer();
++}
++
++void GenerateSrtProgram(Info& info, PassInfo& pass_info) {
++    if (pass_info.srt_roots.empty()) {
++        return;
++    }
++
++    Arm64SrtEmitter emitter;
++    emitter.Begin();
++    pass_info.dst_off_dw = NUM_USER_DATA_REGS;
++    ASSERT(pass_info.dst_off_dw == info.srt_info.flattened_bufsize_dw);
++    for (const auto& [sgpr_base, root] : pass_info.srt_roots) {
++        VisitPointer(static_cast<u32>(sgpr_base), root, pass_info, emitter);
++    }
++    emitter.End();
++
++    info.srt_info.walker_func = RegisterWalkerCode(emitter.Data(), emitter.Size());
++    ASSERT(info.srt_info.walker_func != nullptr);
++    info.srt_info.walker_func_size = emitter.Size();
++    info.srt_info.flattened_bufsize_dw = pass_info.dst_off_dw;
++}
++
++} // namespace
++
++void FlattenExtendedUserdataPass(IR::Program& program) {
++    Shader::Info& info = program.info;
++    PassInfo pass_info;
++    boost::container::small_vector<IR::Inst*, 32> all_readconsts;
++
++    for (auto r_it = program.post_order_blocks.rbegin(); r_it != program.post_order_blocks.rend();
++         ++r_it) {
++        IR::Block* block = *r_it;
++        for (IR::Inst& inst : *block) {
++            if (inst.GetOpcode() != IR::Opcode::ReadConst) {
++                continue;
++            }
++            if (!inst.Arg(1).IsImmediate()) {
++                LOG_WARNING(Render_Recompiler, "ReadConst has non-immediate offset");
++                continue;
++            }
++
++            all_readconsts.push_back(&inst);
++            if (pass_info.DeduplicateInstruction(&inst) != &inst) {
++                continue;
++            }
++
++            IR::Inst* ptr_composite = inst.Arg(0).InstRecursive();
++            const auto pred = [](IR::Inst* candidate) -> std::optional<IR::Inst*> {
++                if (candidate->GetOpcode() == IR::Opcode::GetUserData ||
++                    candidate->GetOpcode() == IR::Opcode::ReadConst) {
++                    return candidate;
++                }
++                return std::nullopt;
++            };
++            auto base0 = IR::BreadthFirstSearch(ptr_composite->Arg(0), pred);
++            auto base1 = IR::BreadthFirstSearch(ptr_composite->Arg(1), pred);
++            ASSERT_MSG(base0 && base1, "ReadConst not from constant memory");
++
++            IR::Inst* ptr_lo = pass_info.DeduplicateInstruction(base0.value());
++            auto [uses, inserted] =
++                pass_info.pointer_uses.try_emplace(ptr_lo, PassInfo::PtrUserList{});
++            uses->second[inst.Arg(1).U32()] = &inst;
++            if (ptr_lo->GetOpcode() == IR::Opcode::GetUserData) {
++                pass_info.srt_roots[ptr_lo->Arg(0).ScalarReg()] = ptr_lo;
++            }
++        }
++    }
++
++    GenerateSrtProgram(info, pass_info);
++    for (IR::Inst* readconst : all_readconsts) {
++        ASSERT(pass_info.vn_to_inst.contains(pass_info.gvn_table.GetValueNumber(readconst)));
++        IR::Inst* original = pass_info.DeduplicateInstruction(readconst);
++        readconst->SetFlags<u32>(original->Flags<u32>());
++    }
++    info.RefreshFlatBuf();
++}
++
++} // namespace Shader::Optimization
++
+ #else
+ 
+ namespace Shader {
+diff --git a/src/shader_recompiler/ir/passes/srt.h b/src/shader_recompiler/ir/passes/srt.h
+index 918b832e..6324e134 100644
+--- a/src/shader_recompiler/ir/passes/srt.h
++++ b/src/shader_recompiler/ir/passes/srt.h
+@@ -15,6 +15,7 @@ namespace Shader {
+ 
+ using PFN_SrtWalker = void PS4_SYSV_ABI (*)(const u32* /*user_data*/, u32* /*flat_dst*/);
+ PFN_SrtWalker RegisterWalkerCode(const u8* ptr, size_t size);
++void WarmUpIosSrtCodePool();
+ 
+ struct PersistentSrtInfo {
+     // Special case when fetch shader uses step rates.
+diff --git a/src/video_core/renderer_vulkan/vk_platform.cpp b/src/video_core/renderer_vulkan/vk_platform.cpp
+index 864a7ca1..2f469a03 100644
+--- a/src/video_core/renderer_vulkan/vk_platform.cpp
++++ b/src/video_core/renderer_vulkan/vk_platform.cpp
+@@ -25,6 +25,10 @@
+ 
+ #ifdef __APPLE__
+ #include <mach-o/dyld.h>
++#include <TargetConditionals.h>
++#if TARGET_OS_IPHONE
++#include <dlfcn.h>
++#endif
+ #endif
+ 
+ namespace Vulkan {
+@@ -270,9 +274,17 @@ vk::UniqueInstance CreateInstance(Frontend::WindowSystemType window_type, bool e
+     setenv("VK_DRIVER_FILES", icd_path.c_str(), true);
+ #endif
+ 
++#if defined(__APPLE__) && TARGET_OS_IPHONE
++    auto get_instance_proc_addr =
++        reinterpret_cast<PFN_vkGetInstanceProcAddr>(dlsym(RTLD_DEFAULT, "vkGetInstanceProcAddr"));
++    ASSERT_MSG(get_instance_proc_addr != nullptr,
++               "MoltenVK vkGetInstanceProcAddr symbol is unavailable");
++    VULKAN_HPP_DEFAULT_DISPATCHER.init(get_instance_proc_addr);
++#else
+     static vk::detail::DynamicLoader dl;
+     VULKAN_HPP_DEFAULT_DISPATCHER.init(
+         dl.getProcAddress<PFN_vkGetInstanceProcAddr>("vkGetInstanceProcAddr"));
++#endif
+ 
+     const auto [available_version_result, available_version] =
+         VULKAN_HPP_DEFAULT_DISPATCHER.vkEnumerateInstanceVersion
