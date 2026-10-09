@@ -57,16 +57,19 @@ jobs:
           from pathlib import Path
           p = Path("externals/MoltenVK/Common/CMakeLists.txt")
           s = p.read_text()
-          old = "find_library(APPKIT_LIBRARY AppKit REQUIRED)"
+          old = """        find_library(APPKIT_LIBRARY AppKit REQUIRED)
+        target_link_libraries(MoltenVK_Common PUBLIC ${APPKIT_LIBRARY})"""
           if old not in s:
-              raise SystemExit("Expected AppKit line not found")
+              raise SystemExit("Expected complete AppKit block not found in MoltenVK source")
           s = s.replace(
               old,
-              'if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")\n    ' + old + '\nendif()',
+              """        if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+            find_library(APPKIT_LIBRARY AppKit REQUIRED)
+            target_link_libraries(MoltenVK_Common PUBLIC ${APPKIT_LIBRARY})
+        endif()""",
               1
           )
           p.write_text(s)
-          PATCH
 
           python3 - <<'PATCH'
           from pathlib import Path
