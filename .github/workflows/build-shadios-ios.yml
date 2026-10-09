@@ -126,13 +126,13 @@ jobs:
           p = Path("CMakeLists.txt")
           s = p.read_text()
 
-          if "enable_language(OBJC OBJCXX)" in s:
-              print("Objective-C languages already enabled.")
+          if "enable_language(OBJCXX)" in s:
+              print("Objective-C++ language already enabled.")
               raise SystemExit(0)
 
           match = re.search(r'\bproject\s*\([^)]*\)', s, re.IGNORECASE)
           if not match:
-              raise SystemExit("Could not locate the root project() command")
+              raise SystemExit("Could not locate root project() command")
 
           insertion = (
               match.group(0)
@@ -144,10 +144,8 @@ jobs:
 
           s = s[:match.start()] + insertion + s[match.end():]
           p.write_text(s)
-          print("Enabled OBJC and OBJCXX for iOS.")
+          print("Enabled Objective-C and Objective-C++ for iOS.")
           PY
-
-          grep -n -A5 -B2 'enable_language(OBJC)' CMakeLists.txt
 
       - name: Configure iOS ARM64
         working-directory: ShadiOS/upstream-shadPS4
@@ -164,7 +162,7 @@ jobs:
       - name: Build emulator library
         working-directory: ShadiOS/upstream-shadPS4
         run: |
-          cmake --build build-shadios-ios --target shadps4 --parallel 3
+          cmake --build build-shadios-ios --target shadps4 --parallel 1
 
       - name: Package library
         working-directory: ShadiOS/upstream-shadPS4
