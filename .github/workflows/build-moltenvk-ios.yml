@@ -62,7 +62,8 @@ jobs:
         run: |
           cmake --build build-moltenvk-ios \
             --config Release \
-            --target MoltenVK
+            --target MoltenVK \
+            -- -allowProvisioningUpdates CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGNING_IDENTITY=""
 
       - name: Package framework
         run: |
