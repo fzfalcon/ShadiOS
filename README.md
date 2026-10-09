@@ -1,6 +1,3 @@
-🔥 ShadiOS it is!
-
-[2026年のデザイントレンド予想をAIに聞いてみた｜cake](https://images.openai.com/static-rsc-4/EtjvPfdv22N56VI_vJNiTrQEIErkbaANTR8nOcq1JOZQO2Z3tHtgqpXxq9gsP0zdhw8puOgZmUeYRpCHaI-ZGcuGYgWKctN9e3MBBfWRaQUpWpQW464RFrjU0sujR83A5ThJiKgeL8_yLpd4br1Ya1eD_3WjTspguNunOQ_kVrw?purpose=inline)
 
 # ShadiOS
 
