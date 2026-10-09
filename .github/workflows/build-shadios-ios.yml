@@ -1,3 +1,4 @@
+
 name: Build ShadiOS iOS
 
 on:
@@ -52,37 +53,58 @@ jobs:
       - name: Patch MoltenVK for iOS
         working-directory: ShadiOS/upstream-shadPS4
         run: |
-          python3 - <<'PATCH'
+          python3 - <<'PY_APPKIT'
           from pathlib import Path
+          import re
+
           p = Path("externals/MoltenVK/Common/CMakeLists.txt")
           s = p.read_text()
-          old = """        find_library(APPKIT_LIBRARY AppKit REQUIRED)
-        target_link_libraries(MoltenVK_Common PUBLIC ${APPKIT_LIBRARY})"""
-          if old not in s:
-              raise SystemExit("Expected complete AppKit block not found in MoltenVK source")
-          s = s.replace(
-              old,
-              """        if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
-            find_library(APPKIT_LIBRARY AppKit REQUIRED)
-            target_link_libraries(MoltenVK_Common PUBLIC ${APPKIT_LIBRARY})
-        endif()""",
-              1
-          )
-          p.write_text(s)
 
-          python3 - <<'PATCH'
+          pattern = re.compile(
+              r"(?m)^([ \t]*)find_library\(APPKIT_LIBRARY AppKit REQUIRED\)\n"
+              r"\1target_link_libraries\(MoltenVK_Common PUBLIC \$\{APPKIT_LIBRARY\}\)[ \t]*$"
+          )
+
+          if "find_library(APPKIT_LIBRARY AppKit REQUIRED)" not in s:
+              raise SystemExit("AppKit block not found")
+
+          if 'if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")' not in s:
+              replacement = (
+                  r'\1if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")' + "\n"
+                  r'\1    find_library(APPKIT_LIBRARY AppKit REQUIRED)' + "\n"
+                  r'\1    target_link_libraries(MoltenVK_Common PUBLIC ${APPKIT_LIBRARY})' + "\n"
+                  r'\1endif()'
+              )
+              s, count = pattern.subn(replacement, s, count=1)
+              if count != 1:
+                  raise SystemExit("Could not safely patch the AppKit block")
+
+          p.write_text(s)
+          PY_APPKIT
+
+          python3 - <<'PY_FRAMEWORK'
           from pathlib import Path
+
           p = Path("externals/MoltenVK/CMakeLists.txt")
           s = p.read_text()
           marker = 'add_subdirectory("MoltenVK")'
+
           if marker not in s:
               raise SystemExit("MoltenVK target declaration not found")
-          if "framework UIKit" not in s:
-              s = s.replace(marker, marker + '\nif(CMAKE_SYSTEM_NAME STREQUAL "iOS")\n    target_link_libraries(MoltenVK PRIVATE "-framework UIKit" "-framework CoreGraphics")\nendif()', 1)
-          p.write_text(s)
-          PATCH
 
-          grep -n -C 2 APPKIT_LIBRARY externals/MoltenVK/Common/CMakeLists.txt
+          if "framework UIKit" not in s:
+              addition = (
+                  marker + "\n"
+                  'if(CMAKE_SYSTEM_NAME STREQUAL "iOS")\n'
+                  '    target_link_libraries(MoltenVK PRIVATE "-framework UIKit" "-framework CoreGraphics")\n'
+                  "endif()"
+              )
+              s = s.replace(marker, addition, 1)
+
+          p.write_text(s)
+          PY_FRAMEWORK
+
+          grep -n -C 3 APPKIT_LIBRARY externals/MoltenVK/Common/CMakeLists.txt
 
       - name: Configure iOS ARM64
         working-directory: ShadiOS/upstream-shadPS4
