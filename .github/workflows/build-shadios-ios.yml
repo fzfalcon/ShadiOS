@@ -49,7 +49,45 @@ jobs:
           git clone https://github.com/shadPS4-emu/ext-MoltenVK.git externals/MoltenVK
           git -C externals/MoltenVK checkout a14cbf433414aa95da7046694b069f0f3f9263a5
           test -f externals/MoltenVK/Common/CMakeLists.txt
-          test -f externals/MoltenVK/CMakeLists.txt
+
+      - name: Patch MoltenVK for iOS
+        working-directory: ShadiOS/upstream-shadPS4
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("externals/MoltenVK/Common/CMakeLists.txt")
+          s = p.read_text()
+
+          old = """find_library(IOKIT_LIBRARY IOKit REQUIRED)"""
+          if old not in s:
+              raise SystemExit("IOKit find_library line not found")
+
+          s = s.replace(
+              old,
+              """if (CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+          find_library(IOKIT_LIBRARY IOKit REQUIRED)
+          endif()""",
+              1
+          )
+
+          old_link = "        ${IOKIT_LIBRARY}\n"
+          if old_link in s:
+              s = s.replace(old_link, "", 1)
+
+          link_block = """if (CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+          target_link_libraries(MoltenVK_Common PUBLIC ${IOKIT_LIBRARY})
+          endif()
+          """
+
+          if "target_link_libraries(MoltenVK_Common PUBLIC ${IOKIT_LIBRARY})" not in s:
+              s += "\n" + link_block
+
+          p.write_text(s)
+          print("Patched IOKit dependency for iOS.")
+          PY
+
+          grep -n -C 3 'IOKIT_LIBRARY' externals/MoltenVK/Common/CMakeLists.txt
 
       - name: Configure iOS ARM64
         working-directory: ShadiOS/upstream-shadPS4
