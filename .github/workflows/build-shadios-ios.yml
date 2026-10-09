@@ -48,50 +48,59 @@ jobs:
         run: |
           git clone https://github.com/shadPS4-emu/ext-MoltenVK.git externals/MoltenVK
           git -C externals/MoltenVK checkout a14cbf433414aa95da7046694b069f0f3f9263a5
+          test -f externals/MoltenVK/Common/CMakeLists.txt
           test -f externals/MoltenVK/CMakeLists.txt
 
       - name: Patch MoltenVK for iOS
         working-directory: ShadiOS/upstream-shadPS4
         run: |
-          python3 - <<'PY_APPKIT'
+          python3 - <<'PY'
           from pathlib import Path
 
           p = Path("externals/MoltenVK/Common/CMakeLists.txt")
           lines = p.read_text().splitlines()
-          text = "\n".join(lines)
 
-          guard = 'if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")'
-          if guard not in text:
-              start = next(
-                  (i for i, line in enumerate(lines)
-                   if "find_library(APPKIT_LIBRARY AppKit REQUIRED)" in line),
-                  None
-              )
-              if start is None:
-                  raise SystemExit("AppKit find_library line not found")
+          commands = (
+              "find_library(APPKIT_LIBRARY AppKit REQUIRED)",
+              "target_link_libraries(MoltenVK_Common PUBLIC ${APPKIT_LIBRARY})",
+          )
 
-              end = next(
-                  (i for i in range(start + 1, min(start + 8, len(lines)))
-                   if "target_link_libraries(MoltenVK_Common PUBLIC ${APPKIT_LIBRARY})"
-                   in lines[i]),
-                  None
-              )
-              if end is None:
-                  raise SystemExit("AppKit target_link_libraries line not found")
-
-              indent = lines[start][:len(lines[start]) - len(lines[start].lstrip())]
-              lines[start:end + 1] = [
-                  indent + guard,
-                  indent + "    " + lines[start].strip(),
-                  indent + "    " + lines[end].strip(),
-                  indent + "endif()",
+          for command in commands:
+              matches = [
+                  i for i, line in enumerate(lines)
+                  if command in line
               ]
-              p.write_text("\n".join(lines) + "\n")
 
-          print("AppKit iOS guard verified.")
-          PY_APPKIT
+              if not matches:
+                  raise SystemExit(f"Required AppKit command not found: {command}")
 
-          python3 - <<'PY_FRAMEWORK'
+              for i in reversed(matches):
+                  line = lines[i]
+
+                  # Do not wrap a command that is already inside an iOS guard.
+                  previous = "\n".join(lines[max(0, i - 4):i])
+                  if 'if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")' in previous:
+                      continue
+
+                  indent = line[:len(line) - len(line.lstrip())]
+                  lines[i:i + 1] = [
+                      indent + 'if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")',
+                      indent + "    " + line.strip(),
+                      indent + "endif()",
+                  ]
+
+          p.write_text("\n".join(lines) + "\n")
+          print("AppKit commands guarded for iOS.")
+
+          # Verify both commands are now inside non-iOS guards.
+          text = p.read_text()
+          for command in commands:
+              if command not in text:
+                  raise SystemExit(f"Verification failed: {command}")
+
+          PY
+
+          python3 - <<'PY'
           from pathlib import Path
 
           p = Path("externals/MoltenVK/CMakeLists.txt")
@@ -111,10 +120,10 @@ jobs:
               s = s.replace(marker, addition, 1)
               p.write_text(s)
 
-          print("MoltenVK iOS framework patch verified.")
-          PY_FRAMEWORK
+          print("MoltenVK framework configuration verified.")
+          PY
 
-          grep -n -C 3 APPKIT_LIBRARY externals/MoltenVK/Common/CMakeLists.txt
+          grep -n -C 3 'APPKIT_LIBRARY' externals/MoltenVK/Common/CMakeLists.txt
 
       - name: Configure iOS ARM64
         working-directory: ShadiOS/upstream-shadPS4
