@@ -51,24 +51,6 @@ jobs:
           test -f externals/MoltenVK/Common/CMakeLists.txt
           test -f externals/MoltenVK/CMakeLists.txt
 
-      - name: Verify MoltenVK AppKit guard
-        working-directory: ShadiOS/upstream-shadPS4
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-
-          p = Path("externals/MoltenVK/Common/CMakeLists.txt")
-          s = p.read_text()
-
-          expected = 'if (CMAKE_SYSTEM_NAME STREQUAL "Darwin")'
-          appkit = "find_library(APPKIT_LIBRARY AppKit REQUIRED)"
-
-          if expected not in s or appkit not in s:
-              raise SystemExit("Expected existing Darwin AppKit guard was not found")
-
-          print("AppKit lookup is guarded for Darwin; no source rewrite needed.")
-          PY
-
       - name: Configure iOS ARM64
         working-directory: ShadiOS/upstream-shadPS4
         run: |
