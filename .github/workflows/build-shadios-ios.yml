@@ -90,7 +90,7 @@ jobs:
               )
 
           p.write_text(s)
-          print("MoltenVK framework patch applied.")
+          print("MoltenVK platform framework patch applied.")
           PY
 
           python3 - <<'PY'
@@ -110,11 +110,79 @@ jobs:
                   '    target_link_libraries(MoltenVK PRIVATE "-framework UIKit" "-framework CoreGraphics")\n'
                   "endif()"
               )
-              s = s.replace(marker, addition, 1)
-              p.write_text(s)
+              p.write_text(s.replace(marker, addition, 1))
 
-          print("MoltenVK iOS framework patch applied.")
+          print("MoltenVK iOS framework configuration applied.")
           PY
+
+      - name: Build native macOS font generator
+        working-directory: ShadiOS/upstream-shadPS4
+        run: |
+          mkdir -p host-tools
+          clang++ -std=c++17 \
+            externals/imgui/misc/fonts/binary_to_compressed_c.cpp \
+            -o host-tools/Dear_ImGui_FontEmbed
+          chmod +x host-tools/Dear_ImGui_FontEmbed
+          file host-tools/Dear_ImGui_FontEmbed
+          host-tools/Dear_ImGui_FontEmbed --help || true
+
+      - name: Configure host font generator for cross-compilation
+        working-directory: ShadiOS/upstream-shadPS4
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("src/imgui/renderer/CMakeLists.txt")
+          s = p.read_text()
+
+          old_target = (
+              'add_executable(Dear_ImGui_FontEmbed '
+              '${CMAKE_SOURCE_DIR}/externals/imgui/misc/fonts/binary_to_compressed_c.cpp)'
+          )
+
+          new_target = """if(CMAKE_CROSSCOMPILING AND HOST_FONT_EMBED_EXECUTABLE)
+              set(FONT_EMBED_COMMAND "${HOST_FONT_EMBED_EXECUTABLE}")
+              set(FONT_EMBED_DEPENDENCY "")
+          else()
+              add_executable(Dear_ImGui_FontEmbed ${CMAKE_SOURCE_DIR}/externals/imgui/misc/fonts/binary_to_compressed_c.cpp)
+              set(FONT_EMBED_COMMAND "$<TARGET_FILE:Dear_ImGui_FontEmbed>")
+              set(FONT_EMBED_DEPENDENCY Dear_ImGui_FontEmbed)
+          endif()"""
+
+          if "set(FONT_EMBED_COMMAND" not in s:
+              if old_target not in s:
+                  raise SystemExit("Font generator target declaration not found")
+              s = s.replace(old_target, new_target, 1)
+
+          old_command = (
+              'COMMAND $<TARGET_FILE:Dear_ImGui_FontEmbed> -nostatic '
+          )
+          if old_command in s:
+              s = s.replace(
+                  old_command,
+                  'COMMAND ${FONT_EMBED_COMMAND} -nostatic ',
+                  1
+              )
+          elif 'COMMAND ${FONT_EMBED_COMMAND} -nostatic ' not in s:
+              raise SystemExit("Font generator command not found")
+
+          old_depends = (
+              'DEPENDS Dear_ImGui_FontEmbed "fonts/${FONT_FILE}"'
+          )
+          if old_depends in s:
+              s = s.replace(
+                  old_depends,
+                  'DEPENDS ${FONT_EMBED_DEPENDENCY} "fonts/${FONT_FILE}"',
+                  1
+              )
+          elif 'DEPENDS ${FONT_EMBED_DEPENDENCY} "fonts/${FONT_FILE}"' not in s:
+              raise SystemExit("Font generator DEPENDS line not found")
+
+          p.write_text(s)
+          print("CMake now supports the host-native font generator.")
+          PY
+
+          grep -n -A12 'FONT_EMBED_COMMAND' src/imgui/renderer/CMakeLists.txt
 
       - name: Enable Objective-C languages for iOS
         working-directory: ShadiOS/upstream-shadPS4
@@ -144,7 +212,7 @@ jobs:
 
           s = s[:match.start()] + insertion + s[match.end():]
           p.write_text(s)
-          print("Enabled Objective-C and Objective-C++ for iOS.")
+          print("Objective-C and Objective-C++ enabled for iOS.")
           PY
 
       - name: Configure iOS ARM64
@@ -157,7 +225,8 @@ jobs:
             -DCMAKE_OSX_DEPLOYMENT_TARGET=17.0 \
             -DCMAKE_BUILD_TYPE=Release \
             -DENABLE_TESTS=OFF \
-            -DALLOWS_ONESHOT_TIMERS_WITH_TIMEOUT_ZERO_EXITCODE=0
+            -DALLOWS_ONESHOT_TIMERS_WITH_TIMEOUT_ZERO_EXITCODE=0 \
+            -DHOST_FONT_EMBED_EXECUTABLE="${PWD}/host-tools/Dear_ImGui_FontEmbed"
 
       - name: Build emulator library
         working-directory: ShadiOS/upstream-shadPS4
