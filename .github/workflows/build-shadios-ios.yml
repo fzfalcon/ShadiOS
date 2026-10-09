@@ -16,15 +16,23 @@ jobs:
       - name: Checkout ShadiOS
         uses: actions/checkout@v4
         with:
+          ref: main
           path: ShadiOS
 
-      - name: Checkout iOS port source
+      - name: Checkout official shadPS4
         uses: actions/checkout@v4
         with:
-          repository: fzfalcon/shadPS4
-          ref: shadios-ios-port
+          repository: shadps4-emu/shadPS4
+          ref: c7e065d1b415be16c23e260a21f1dd8bbfc4cb57
           path: ShadiOS/upstream-shadPS4
           submodules: recursive
+
+      - name: Apply ShadiOS iOS patch
+        working-directory: ShadiOS/upstream-shadPS4
+        run: |
+          test -f ../shadios-ios-changes.patch
+          git apply --check ../shadios-ios-changes.patch
+          git apply ../shadios-ios-changes.patch
 
       - name: Verify iOS source
         working-directory: ShadiOS/upstream-shadPS4
@@ -33,8 +41,7 @@ jobs:
           grep -n -A15 'if(CMAKE_SYSTEM_NAME STREQUAL "iOS")' CMakeLists.txt
 
       - name: Install build tools
-        run: |
-          brew install cmake ninja pkg-config
+        run: brew install cmake ninja pkg-config
 
       - name: Configure iOS ARM64
         working-directory: ShadiOS/upstream-shadPS4
@@ -50,8 +57,7 @@ jobs:
       - name: Build emulator library
         working-directory: ShadiOS/upstream-shadPS4
         run: |
-          cmake --build build-shadios-ios \
-            --target shadps4 --parallel 3
+          cmake --build build-shadios-ios --target shadps4 --parallel 3
 
       - name: Package library
         working-directory: ShadiOS/upstream-shadPS4
