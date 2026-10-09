@@ -21,7 +21,7 @@ jobs:
       - name: Checkout shadPS4 source
         uses: actions/checkout@v4
         with:
-          repository: fzfalcon/shadPS4
+          repository: shadps4-emu/shadPS4
           path: ShadiOS/upstream-shadPS4
           submodules: recursive
 
