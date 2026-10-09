@@ -31,20 +31,27 @@ jobs:
         run: |
           python3 - <<'PATCH'
           from pathlib import Path
+
           p = Path("externals/MoltenVK/Common/CMakeLists.txt")
-          s = p.read_text()
-          old = "find_library(APPKIT_LIBRARY AppKit)"
-          if old not in s:
-              old = "find_library(APPKIT_LIBRARY AppKit REQUIRED)"
-          if old not in s:
-              print("AppKit lookup context:")
-              for i, line in enumerate(s.splitlines(), 1):
-                  if "APPKIT_LIBRARY" in line or "find_library" in line:
-                      print(f"{i}: {line}")
-              raise SystemExit("AppKit lookup not matched; stopping.")
-          s = s.replace(old, 'if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")\\n    ' + old + '\\nendif()', 1)
-          p.write_text(s)
-          print("Patched AppKit lookup for iOS.")
+          lines = p.read_text().splitlines()
+          result = []
+          patched = False
+
+          for line in lines:
+              if "find_library(APPKIT_LIBRARY" in line:
+                  indent = line[:len(line) - len(line.lstrip())]
+                  result.append(indent + 'if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")')
+                  result.append("    " + line)
+                  result.append(indent + "endif()")
+                  patched = True
+              else:
+                  result.append(line)
+
+          if not patched:
+              raise SystemExit("AppKit lookup not found; stopping safely.")
+
+          p.write_text("\\n".join(result) + "\\n")
+          print("AppKit lookup patched.")
           PATCH
           grep -n -C 3 APPKIT_LIBRARY externals/MoltenVK/Common/CMakeLists.txt
 
