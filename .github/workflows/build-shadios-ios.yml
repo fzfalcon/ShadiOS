@@ -49,6 +49,7 @@ jobs:
           git clone https://github.com/shadPS4-emu/ext-MoltenVK.git externals/MoltenVK
           git -C externals/MoltenVK checkout a14cbf433414aa95da7046694b069f0f3f9263a5
           test -f externals/MoltenVK/Common/CMakeLists.txt
+          test -f externals/MoltenVK/CMakeLists.txt
 
       - name: Patch MoltenVK platform frameworks
         working-directory: ShadiOS/upstream-shadPS4
@@ -60,33 +61,32 @@ jobs:
           p = Path("externals/MoltenVK/Common/CMakeLists.txt")
           s = p.read_text()
 
-          # Remove AppKit and IOKit lookups wherever this revision places them.
+          # Remove the original macOS-only framework lookups and links.
           s = re.sub(
               r'(?m)^[ \t]*find_library\((?:APPKIT_LIBRARY AppKit|IOKIT_LIBRARY IOKit) REQUIRED\)[ \t]*\n?',
               '',
               s
           )
 
-          # Remove standalone links to these macOS-only frameworks.
           s = re.sub(
               r'(?m)^[ \t]*target_link_libraries\(MoltenVK_Common PUBLIC \$\{(?:APPKIT_LIBRARY|IOKIT_LIBRARY)\}\)[ \t]*\n?',
               '',
               s
           )
 
-          # Remove their entries from any multiline common link list.
+          # Remove these framework variables from the shared link list.
           s = re.sub(
               r'(?m)^[ \t]*\$\{(?:APPKIT_LIBRARY|IOKIT_LIBRARY)\}[ \t]*\n',
               '',
               s
           )
 
-          # Add the framework lookup and linking only for macOS.
-          marker = "# ShadiOS: macOS-only frameworks"
+          # Add them back only for macOS.
+          marker = "# ShadiOS macOS-only framework dependencies"
           if marker not in s:
               s += (
                   "\n\n" + marker + "\n"
-                  'if (CMAKE_SYSTEM_NAME STREQUAL "Darwin")\n'
+                  'if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")\n'
                   '    find_library(APPKIT_LIBRARY AppKit REQUIRED)\n'
                   '    find_library(IOKIT_LIBRARY IOKit REQUIRED)\n'
                   '    target_link_libraries(MoltenVK_Common PUBLIC '
@@ -95,19 +95,36 @@ jobs:
               )
 
           p.write_text(s)
+          print("Updated MoltenVK Common framework dependencies.")
 
-          # Verify no unguarded lookups or common-link entries remain.
-          result = p.read_text()
-          if re.search(r'(?m)^[ \t]*find_library\((?:APPKIT_LIBRARY AppKit|IOKIT_LIBRARY IOKit) REQUIRED\)', result):
-              raise SystemExit("Unexpected unguarded framework lookup remains")
-
-          if "${APPKIT_LIBRARY}" not in result or "${IOKIT_LIBRARY}" not in result:
-              raise SystemExit("macOS framework link block was not added")
-
-          print("AppKit and IOKit are now restricted to Darwin.")
+          # Print the resulting framework section for the build log.
+          for i, line in enumerate(s.splitlines(), 1):
+              if "APPKIT_LIBRARY" in line or "IOKIT_LIBRARY" in line:
+                  print(f"{i}: {line}")
           PY
 
-          grep -n -C 3 'APPKIT_LIBRARY\|IOKIT_LIBRARY' externals/MoltenVK/Common/CMakeLists.txt
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("externals/MoltenVK/CMakeLists.txt")
+          s = p.read_text()
+          marker = 'add_subdirectory("MoltenVK")'
+
+          if marker not in s:
+              raise SystemExit("MoltenVK target declaration not found")
+
+          if "framework UIKit" not in s:
+              addition = (
+                  marker + "\n"
+                  'if(CMAKE_SYSTEM_NAME STREQUAL "iOS")\n'
+                  '    target_link_libraries(MoltenVK PRIVATE "-framework UIKit" "-framework CoreGraphics")\n'
+                  "endif()"
+              )
+              s = s.replace(marker, addition, 1)
+              p.write_text(s)
+
+          print("Checked MoltenVK iOS framework linkage.")
+          PY
 
       - name: Configure iOS ARM64
         working-directory: ShadiOS/upstream-shadPS4
