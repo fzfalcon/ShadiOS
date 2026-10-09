@@ -70,15 +70,12 @@ jobs:
             --target MoltenVK \
             -- -allowProvisioningUpdates CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGNING_IDENTITY=""
 
-      - name: Package framework
+      - name: Package MoltenVK build output
         run: |
-          FRAMEWORK="$(find build-moltenvk-ios -type d -name MoltenVK.framework -print -quit)"
-          test -n "$FRAMEWORK" || {
-            echo "MoltenVK.framework was not generated"
-            exit 1
-          }
           mkdir -p artifacts
-          ditto -c -k --sequesterRsrc "$FRAMEWORK" artifacts/MoltenVK-iOS.zip
+          find build-moltenvk-ios -type f \\( -name "libMoltenVK*.dylib" -o -name "libMoltenVK*.a" \\) -print
+          cp -R build-moltenvk-ios/MoltenVK/Release-iphoneos artifacts/MoltenVK-build
+          ditto -c -k --sequesterRsrc artifacts/MoltenVK-build artifacts/MoltenVK-iOS.zip
 
       - name: Upload iOS framework
         uses: actions/upload-artifact@v4
