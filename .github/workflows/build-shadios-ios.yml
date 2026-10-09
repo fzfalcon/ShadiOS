@@ -43,6 +43,13 @@ jobs:
       - name: Install build tools
         run: brew install cmake ninja pkg-config
 
+      - name: Fetch MoltenVK dependency
+        working-directory: ShadiOS/upstream-shadPS4
+        run: |
+          git clone https://github.com/shadPS4-emu/ext-MoltenVK.git externals/MoltenVK
+          git -C externals/MoltenVK checkout a14cbf433414aa95da7046694b069f0f3f9263a5
+          test -f externals/MoltenVK/CMakeLists.txt
+
       - name: Configure iOS ARM64
         working-directory: ShadiOS/upstream-shadPS4
         run: |
