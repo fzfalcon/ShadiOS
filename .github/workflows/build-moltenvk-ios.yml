@@ -70,12 +70,35 @@ jobs:
             --target MoltenVK \
             -- -allowProvisioningUpdates CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGNING_IDENTITY=""
 
-      - name: Package MoltenVK build output
+      - name: Package MoltenVK framework
         run: |
-          mkdir -p artifacts
-          find build-moltenvk-ios -type f -name "libMoltenVK*" -print
-          cp -R build-moltenvk-ios/MoltenVK/Release-iphoneos artifacts/MoltenVK-build
-          ditto -c -k --sequesterRsrc artifacts/MoltenVK-build artifacts/MoltenVK-iOS.zip
+          set -euo pipefail
+          LIB="$(find build-moltenvk-ios -type f -name 'libMoltenVK*.dylib' -print -quit)"
+          test -n "$LIB"
+          mkdir -p artifacts/MoltenVK.framework
+          cp "$LIB" artifacts/MoltenVK.framework/MoltenVK
+
+          install_name_tool -id "@rpath/MoltenVK.framework/MoltenVK" artifacts/MoltenVK.framework/MoltenVK
+
+          cat > artifacts/MoltenVK.framework/Info.plist <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleExecutable</key><string>MoltenVK</string>
+            <key>CFBundleIdentifier</key><string>org.shadios.MoltenVK</string>
+            <key>CFBundleName</key><string>MoltenVK</string>
+            <key>CFBundlePackageType</key><string>FMWK</string>
+            <key>CFBundleSupportedPlatforms</key><array><string>iPhoneOS</string></array>
+            <key>MinimumOSVersion</key><string>17.0</string>
+          </dict>
+          </plist>
+          PLIST
+
+          codesign --force --sign - artifacts/MoltenVK.framework
+          otool -D artifacts/MoltenVK.framework/MoltenVK
+          file artifacts/MoltenVK.framework/MoltenVK
+          ditto -c -k --sequesterRsrc artifacts/MoltenVK.framework artifacts/MoltenVK-iOS.zip
 
       - name: Upload iOS framework
         uses: actions/upload-artifact@v4
