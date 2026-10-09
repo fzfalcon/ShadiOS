@@ -61,7 +61,6 @@ jobs:
           p = Path("externals/MoltenVK/Common/CMakeLists.txt")
           s = p.read_text()
 
-          # Remove the original macOS-only framework lookups and links.
           s = re.sub(
               r'(?m)^[ \t]*find_library\((?:APPKIT_LIBRARY AppKit|IOKIT_LIBRARY IOKit) REQUIRED\)[ \t]*\n?',
               '',
@@ -74,14 +73,12 @@ jobs:
               s
           )
 
-          # Remove these framework variables from the shared link list.
           s = re.sub(
               r'(?m)^[ \t]*\$\{(?:APPKIT_LIBRARY|IOKIT_LIBRARY)\}[ \t]*\n',
               '',
               s
           )
 
-          # Add them back only for macOS.
           marker = "# ShadiOS macOS-only framework dependencies"
           if marker not in s:
               s += (
@@ -95,12 +92,7 @@ jobs:
               )
 
           p.write_text(s)
-          print("Updated MoltenVK Common framework dependencies.")
-
-          # Print the resulting framework section for the build log.
-          for i, line in enumerate(s.splitlines(), 1):
-              if "APPKIT_LIBRARY" in line or "IOKIT_LIBRARY" in line:
-                  print(f"{i}: {line}")
+          print("Updated MoltenVK framework configuration.")
           PY
 
           python3 - <<'PY'
@@ -120,8 +112,7 @@ jobs:
                   '    target_link_libraries(MoltenVK PRIVATE "-framework UIKit" "-framework CoreGraphics")\n'
                   "endif()"
               )
-              s = s.replace(marker, addition, 1)
-              p.write_text(s)
+              p.write_text(s.replace(marker, addition, 1))
 
           print("Checked MoltenVK iOS framework linkage.")
           PY
@@ -135,7 +126,8 @@ jobs:
             -DCMAKE_OSX_ARCHITECTURES=arm64 \
             -DCMAKE_OSX_DEPLOYMENT_TARGET=17.0 \
             -DCMAKE_BUILD_TYPE=Release \
-            -DENABLE_TESTS=OFF
+            -DENABLE_TESTS=OFF \
+            -DALLOWS_ONESHOT_TIMERS_WITH_TIMEOUT_ZERO_EXITCODE=0
 
       - name: Build emulator library
         working-directory: ShadiOS/upstream-shadPS4
@@ -166,5 +158,6 @@ jobs:
           name: ShadiOS-build-diagnostics
           path: |
             ShadiOS/upstream-shadPS4/build-shadios-ios/CMakeFiles/CMakeConfigureLog.yaml
+            ShadiOS/upstream-shadPS4/build-shadios-ios/build.ninja
             ShadiOS/upstream-shadPS4/build-shadios-ios/CMakeCache.txt
           if-no-files-found: ignore
