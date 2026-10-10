@@ -24,7 +24,7 @@ jobs:
           path: ShadiOS
           persist-credentials: false
 
-      - name: Checkout official shadPS4
+      - name: Checkout shadPS4
         uses: actions/checkout@v4
         with:
           repository: shadps4-emu/shadPS4
@@ -43,12 +43,9 @@ jobs:
           git apply ../shadios-ios-changes.patch
 
       - name: Install build tools
-        shell: bash
-        run: |
-          set -euo pipefail
-          brew install cmake ninja pkg-config
+        run: brew install cmake ninja pkg-config
 
-      - name: Fetch MoltenVK dependency
+      - name: Fetch MoltenVK
         working-directory: ShadiOS/upstream-shadPS4
         shell: bash
         run: |
@@ -56,6 +53,113 @@ jobs:
           git clone https://github.com/shadPS4-emu/ext-MoltenVK.git externals/MoltenVK
           git -C externals/MoltenVK checkout a14cbf433414aa95da7046694b069f0f3f9263a5
           git -C externals/MoltenVK submodule update --init --recursive
+
+      - name: Patch libusb for iOS
+        working-directory: ShadiOS/upstream-shadPS4
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("externals/libusb/CMakeLists.txt")
+          text = path.read_text()
+
+          old = """    elseif(APPLE)
+              target_sources(usb-1.0 PRIVATE
+                  "${LIBUSB_ROOT}/os/darwin_usb.c"
+                  "${LIBUSB_ROOT}/os/darwin_usb.h"
+              )
+              target_link_libraries(usb-1.0 PRIVATE
+                  "-framework Foundation"
+                  "-framework IOKit"
+                  "-framework Security"
+              )
+          """
+
+          new = """    elseif(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+              # iOS does not support libusb's macOS IOKit USB backend.
+              # Keep common libusb sources so the target can be linked.
+              target_compile_definitions(usb-1.0 PRIVATE SHADIOS_IOS_NO_USB_BACKEND=1)
+          elseif(APPLE)
+              target_sources(usb-1.0 PRIVATE
+                  "${LIBUSB_ROOT}/os/darwin_usb.c"
+                  "${LIBUSB_ROOT}/os/darwin_usb.h"
+              )
+              target_link_libraries(usb-1.0 PRIVATE
+                  "-framework Foundation"
+                  "-framework IOKit"
+                  "-framework Security"
+              )
+          """
+
+          if "SHADIOS_IOS_NO_USB_BACKEND" in text:
+              print("libusb iOS CMake patch already applied.")
+          elif old in text:
+              path.write_text(text.replace(old, new, 1))
+              print("libusb CMake platform selection patched.")
+          else:
+              raise SystemExit(
+                  "Could not find expected APPLE backend block in libusb CMakeLists.txt."
+              )
+          PY
+
+      - name: Add minimal libusb iOS backend
+        working-directory: ShadiOS/upstream-shadPS4
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          root = Path("externals/libusb/libusb")
+          internal = root / "libusbi.h"
+          if not internal.exists():
+              raise SystemExit(f"Missing libusb internal header: {internal}")
+
+          # This source is intentionally only a placeholder. Do not pretend
+          # USB device enumeration is implemented on iOS.
+          stub = root / "os/shadios_ios_usb.c"
+          stub.write_text(r'''
+          /*
+           * ShadiOS experimental iOS libusb backend.
+           * Physical USB enumeration is not implemented here.
+           */
+          #include "libusbi.h"
+
+          const struct usbi_os_backend usbi_backend = {
+              .name = "shadios-ios-no-usb",
+          };
+          ''')
+
+          cmake = Path("externals/libusb/CMakeLists.txt")
+          text = cmake.read_text()
+
+          marker = "SHADIOS_IOS_STUB_SOURCE"
+          if marker not in text:
+              pattern = re.compile(
+                  r'(elseif\(CMAKE_SYSTEM_NAME STREQUAL "iOS"\)\s*\n'
+                  r'.*?SHADIOS_IOS_NO_USB_BACKEND=1\)\s*)',
+                  re.DOTALL,
+              )
+              match = pattern.search(text)
+              if not match:
+                  raise SystemExit("Could not locate the iOS libusb CMake branch.")
+
+              insertion = match.group(1) + f'''
+              # {marker}
+              target_sources(usb-1.0 PRIVATE
+                  "${{LIBUSB_ROOT}}/os/shadios_ios_usb.c"
+              )
+          '''
+              text = text[:match.start()] + insertion + text[match.end():]
+              cmake.write_text(text)
+
+          print("Added experimental iOS USB backend stub.")
+          PY
 
       - name: Patch MoltenVK platform frameworks
         working-directory: ShadiOS/upstream-shadPS4
@@ -68,7 +172,6 @@ jobs:
 
           common = Path("externals/MoltenVK/Common/CMakeLists.txt")
           text = common.read_text()
-
           text = re.sub(
               r'^[ \t]*find_library\((?:APPKIT|IOKIT)_LIBRARY[^\n]*\n',
               '',
@@ -98,11 +201,11 @@ jobs:
 
           root = Path("externals/MoltenVK/CMakeLists.txt")
           text = root.read_text()
+          marker = 'add_subdirectory("MoltenVK")'
 
           if "SHADIOS_IOS_FRAMEWORKS" not in text:
-              marker = 'add_subdirectory("MoltenVK")'
               if marker not in text:
-                  raise SystemExit(f"Expected {marker!r} in {root}")
+                  raise SystemExit(f"Could not find {marker} in {root}")
 
               text = text.replace(
                   marker,
@@ -121,58 +224,7 @@ jobs:
                   1,
               )
           root.write_text(text)
-          print("MoltenVK framework adjustments applied.")
           PY
-
-      - name: Patch ImGuiFileDialog for iOS
-        working-directory: ShadiOS/upstream-shadPS4
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
-
-          path = Path("externals/ImGuiFileDialog/ImGuiFileDialog.cpp")
-          text = path.read_text()
-          marker = "SHADIOS_IOS_SYSTEM_PATCH"
-
-          if marker in text:
-              print("ImGuiFileDialog patch already present.")
-              raise SystemExit(0)
-
-          pattern = re.compile(
-              r"(?m)^([ \t]*)const int dir_err = std::system\(buffer\);[ \t]*$"
-          )
-          matches = list(pattern.finditer(text))
-
-          if len(matches) != 2:
-              raise SystemExit(
-                  f"Expected 2 matching statements, found {len(matches)}. "
-                  "No changes made."
-              )
-
-          def replacement(match):
-              indent = match.group(1)
-              return (
-                  f"{indent}// {marker}\n"
-                  f"{indent}#if defined(__ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__)\n"
-                  f"{indent}const int dir_err = -1;\n"
-                  f"{indent}#else\n"
-                  f"{indent}const int dir_err = std::system(buffer);\n"
-                  f"{indent}#endif"
-              )
-
-          updated = pattern.sub(replacement, text)
-
-          if updated.count(marker) != 2:
-              raise SystemExit("Patch verification failed.")
-
-          path.write_text(updated)
-          print("Both system() statements patched.")
-          PY
-
-          git diff --check -- externals/ImGuiFileDialog/ImGuiFileDialog.cpp
 
       - name: Build native font generator
         working-directory: ShadiOS/upstream-shadPS4
@@ -183,7 +235,6 @@ jobs:
           clang++ -std=c++17 \
             externals/imgui/misc/fonts/binary_to_compressed_c.cpp \
             -o host-tools/Dear_ImGui_FontEmbed
-          test -x host-tools/Dear_ImGui_FontEmbed
 
       - name: Configure host font generator
         working-directory: ShadiOS/upstream-shadPS4
@@ -198,7 +249,7 @@ jobs:
           text = path.read_text()
 
           if "HOST_FONT_EMBED_EXECUTABLE" in text:
-              print("Font generator configuration already present.")
+              print("Font generator patch already present.")
               raise SystemExit(0)
 
           pattern = re.compile(
@@ -217,36 +268,18 @@ jobs:
 
           text, count = pattern.subn(replacement, text, count=1)
           if count != 1:
-              raise SystemExit("Could not find font generator declaration.")
-
-          if "set(FONT_EMBED_COMMAND" not in text:
-              block = """
-          if(CMAKE_CROSSCOMPILING AND HOST_FONT_EMBED_EXECUTABLE)
-              set(FONT_EMBED_COMMAND "${HOST_FONT_EMBED_EXECUTABLE}")
-          else()
-              set(FONT_EMBED_COMMAND "$<TARGET_FILE:Dear_ImGui_FontEmbed>")
-          endif()
-          """
-              match = re.search(
-                  r'if\(CMAKE_CROSSCOMPILING AND HOST_FONT_EMBED_EXECUTABLE\).*?endif\(\)',
-                  text,
-                  re.DOTALL,
-              )
-              if not match:
-                  raise SystemExit("Could not find patched font target block.")
-              text = text[:match.end()] + "\n" + block + text[match.end():]
+              raise SystemExit("Could not find expected font generator target.")
 
           text, count = re.subn(
               r'COMMAND\s+\$<TARGET_FILE:Dear_ImGui_FontEmbed>',
-              'COMMAND ${FONT_EMBED_COMMAND}',
+              'COMMAND ${HOST_FONT_EMBED_EXECUTABLE}',
               text,
               count=1,
           )
           if count != 1:
-              raise SystemExit("Could not find font generator COMMAND.")
+              raise SystemExit("Could not find expected font generator COMMAND.")
 
           path.write_text(text)
-          print("Font generator configuration updated.")
           PY
 
       - name: Enable Objective-C languages
@@ -262,12 +295,11 @@ jobs:
           text = path.read_text()
 
           if "enable_language(OBJCXX)" in text:
-              print("Objective-C languages already enabled.")
               raise SystemExit(0)
 
           match = re.search(r'\bproject\s*\([^)]*\)', text, re.IGNORECASE)
           if not match:
-              raise SystemExit("Could not find root project() command.")
+              raise SystemExit("Could not locate project() in root CMakeLists.txt.")
 
           block = match.group(0) + """
 
@@ -276,9 +308,7 @@ jobs:
               enable_language(OBJCXX)
           endif()
           """
-          text = text[:match.start()] + block + text[match.end():]
-          path.write_text(text)
-          print("Objective-C and Objective-C++ enabled.")
+          path.write_text(text[:match.start()] + block + text[match.end():])
           PY
 
       - name: Configure iOS ARM64
@@ -293,6 +323,8 @@ jobs:
             -DCMAKE_OSX_DEPLOYMENT_TARGET=17.0 \
             -DCMAKE_BUILD_TYPE=Release \
             -DENABLE_TESTS=OFF \
+            -DLIBUSB_BUILD_TESTING=OFF \
+            -DLIBUSB_BUILD_EXAMPLES=OFF \
             -DALLOWS_ONESHOT_TIMERS_WITH_TIMEOUT_ZERO_EXITCODE=0 \
             -DHOST_FONT_EMBED_EXECUTABLE="${PWD}/host-tools/Dear_ImGui_FontEmbed"
 
@@ -310,9 +342,9 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p ../artifacts
-          find build-shadios-ios -type f -name '*.a' -print
           find build-shadios-ios -type f -name '*.a' -exec cp {} ../artifacts/ \;
-          test -n "$(find ../artifacts -type f -name '*.a' -print -quit)"
+          test -n "$(find ../artifacts -type f -name '*.a' -print -quit)" \
+            || { echo "No static libraries found."; exit 1; }
           ditto -c -k --sequesterRsrc ../artifacts ../ShadiOS-static-libraries.zip
 
       - name: Upload iOS ARM64 artifact
@@ -326,7 +358,7 @@ jobs:
           if-no-files-found: error
           compression-level: 1
 
-      - name: Upload diagnostics
+      - name: Upload build diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
