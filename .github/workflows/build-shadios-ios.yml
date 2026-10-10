@@ -129,7 +129,7 @@ jobs:
         working-directory: ShadiOS/upstream-shadPS4
         run: |
           set -euo pipefail
-          cmake --build build-shadios-ios --target shadps4 --parallel 3
+          cmake --build build-shadios-ios --target shadps4 --parallel 1
 
       - name: Package library and diagnostics
         if: always()
