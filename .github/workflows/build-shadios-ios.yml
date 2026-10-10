@@ -43,6 +43,7 @@ jobs:
         run: |
           set -euo pipefail
           brew install cmake ninja pkg-config
+          cmake --version
 
       - name: Fetch MoltenVK dependency
         working-directory: ShadiOS/upstream-shadPS4
