@@ -107,6 +107,7 @@ jobs:
           test -d "$IOS_SDK"
           cmake -S . -B build-shadios-ios -G Ninja \
             -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OBJCXX_COMPILER="$(xcrun --find clang++)" \
             -DCMAKE_OSX_SYSROOT="$IOS_SDK" \
             -DCMAKE_OSX_ARCHITECTURES=arm64 \
             -DCMAKE_OSX_DEPLOYMENT_TARGET=17.0 \
