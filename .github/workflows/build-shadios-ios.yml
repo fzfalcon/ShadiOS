@@ -34,13 +34,19 @@ jobs:
           git apply --check ../shadios-ios-changes.patch
           git apply ../shadios-ios-changes.patch
 
-      - name: Verify iOS libusb backend
+      - name: Diagnose iOS libusb backend
         working-directory: ShadiOS/upstream-shadPS4
         run: |
-          set -euo pipefail
-          grep -n -A5 'elseif(CMAKE_SYSTEM_NAME STREQUAL "iOS")' \
-            externals/libusb/CMakeLists.txt
-          test -f externals/libusb/libusb/os/null_usb.c
+          set -u
+
+          echo "=== libusb CMake iOS references ==="
+          grep -n -A8 -B4 'iOS' externals/libusb/CMakeLists.txt || true
+
+          echo "=== null_usb.c locations ==="
+          find externals/libusb -name 'null_usb.c' -print || true
+
+          echo "=== libusb OS source directory ==="
+          ls -la externals/libusb/libusb/os || true
 
       - name: Verify iOS source
         working-directory: ShadiOS/upstream-shadPS4
@@ -99,7 +105,7 @@ jobs:
               'endif()'
           )
 
-          if "elseif (CMAKE_SYSTEM_NAME STREQUAL \"iOS\")" in common:
+          if 'elseif (CMAKE_SYSTEM_NAME STREQUAL "iOS")' in common:
               print("MoltenVK AppKit guard already present")
           else:
               updated, count = pattern.subn(replacement, common, count=1)
