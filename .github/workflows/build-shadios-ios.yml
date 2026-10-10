@@ -63,19 +63,66 @@ jobs:
           set -euo pipefail
           if [ ! -d externals/MoltenVK/.git ]; then
             rm -rf externals/MoltenVK
-            git clone https://github.com/shadPS4-emu/ext-MoltenVK.git externals/MoltenVK
+            git clone https://github.com/shadPS4-emu/ext-MoltenVK.git \
+              externals/MoltenVK
           fi
-          git -C externals/MoltenVK checkout a14cbf433414aa95da7046694b069f0f3f9263a5
+          git -C externals/MoltenVK checkout \
+            a14cbf433414aa95da7046694b069f0f3f9263a5
           test -f externals/MoltenVK/CMakeLists.txt
 
-      - name: Inspect MoltenVK CMake
+      - name: Patch MoltenVK for iOS
         working-directory: ShadiOS/upstream-shadPS4
         run: |
           set -euo pipefail
-          echo "=== Common CMake ==="
-          grep -n -A12 -B8 'APPKIT_LIBRARY\|find_library.*AppKit\|MoltenVK_Common' externals/MoltenVK/Common/CMakeLists.txt || true
-          echo "=== Root CMake ==="
-          grep -n -A8 -B5 'add_subdirectory.*MoltenVK\|MoltenVK' externals/MoltenVK/CMakeLists.txt | head -100
+          python3 - <<'PYTHON'
+          from pathlib import Path
+          import re
+
+          path = Path("externals/MoltenVK/Common/CMakeLists.txt")
+          text = path.read_text()
+
+          if re.search(
+              r'elseif\s*\(\s*CMAKE_SYSTEM_NAME\s+STREQUAL\s+"iOS"\s*\)',
+              text,
+          ):
+              print("iOS AppKit guard already exists")
+          else:
+              pattern = re.compile(
+                  r'if\s*\(\s*CMAKE_SYSTEM_NAME\s+STREQUAL\s+"Darwin"\s*\)'
+                  r'(?:(?!endif\s*\(\s*\)).)*'
+                  r'endif\s*\(\s*\)',
+                  re.DOTALL,
+              )
+              match = pattern.search(text)
+              if not match:
+                  raise SystemExit(
+                      "ERROR: Darwin CMake block not found; refusing to modify MoltenVK"
+                  )
+
+              block = match.group(0)
+              if "APPKIT_LIBRARY" not in block:
+                  raise SystemExit(
+                      "ERROR: Darwin block has no APPKIT_LIBRARY reference"
+                  )
+
+              replacement = re.sub(
+                  r'endif\s*\(\s*\)\s*$',
+                  'elseif (CMAKE_SYSTEM_NAME STREQUAL "iOS")\n'
+                  '    # AppKit is unavailable on iOS.\n'
+                  'endif()',
+                  block,
+              )
+              path.write_text(
+                  text[:match.start()] + replacement + text[match.end():]
+              )
+              print("Applied iOS AppKit guard")
+
+          updated = path.read_text()
+          print("=== MoltenVK AppKit references ===")
+          for line_number, line in enumerate(updated.splitlines(), 1):
+              if "APPKIT_LIBRARY" in line or 'STREQUAL "iOS"' in line:
+                  print(f"{line_number}: {line}")
+          PYTHON
 
       - name: Configure iOS ARM64
         working-directory: ShadiOS/upstream-shadPS4
@@ -95,18 +142,23 @@ jobs:
         working-directory: ShadiOS/upstream-shadPS4
         run: |
           set -euo pipefail
-          cmake --build build-shadios-ios --target shadps4 --parallel 3
+          cmake --build build-shadios-ios \
+            --target shadps4 \
+            --parallel 3
 
       - name: Package library
         working-directory: ShadiOS/upstream-shadPS4
         run: |
           set -euo pipefail
           mkdir -p ../shadios-artifact
-          find build-shadios-ios -type f -name 'libshadps4.a' \
+          find build-shadios-ios \
+            -type f \
+            -name 'libshadps4.a' \
             -exec cp {} ../shadios-artifact/ \;
           test -f ../shadios-artifact/libshadps4.a
           xcrun lipo -info ../shadios-artifact/libshadps4.a
-          cp build-shadios-ios/CMakeCache.txt ../shadios-artifact/
+          cp build-shadios-ios/CMakeCache.txt \
+            ../shadios-artifact/
 
       - name: Upload iOS ARM64 library
         uses: actions/upload-artifact@v4
