@@ -108,6 +108,32 @@ jobs:
          cmake --version
          cmake --help-variable CMAKE_OBJCXX_COMPILE_OBJECT
     
+      - name: Build native ImGui font generator
+        working-directory: ShadiOS/upstream-shadPS4
+        run: |
+          set -euo pipefail
+          clang++ -std=c++11 \
+            externals/imgui/misc/fonts/binary_to_compressed_c.cpp \
+            -o "$RUNNER_TEMP/Dear_ImGui_FontEmbed"
+          python3 - "$RUNNER_TEMP/Dear_ImGui_FontEmbed" <<'PYTHON'
+          from pathlib import Path
+          import sys
+
+          p = Path("src/imgui/renderer/CMakeLists.txt")
+          s = p.read_text()
+          old = "add_executable(Dear_ImGui_FontEmbed ${CMAKE_SOURCE_DIR}/externals/imgui/misc/fonts/binary_to_compressed_c.cpp)"
+          new = (
+              "add_executable(Dear_ImGui_FontEmbed IMPORTED GLOBAL)\n"
+              "set_target_properties(Dear_ImGui_FontEmbed PROPERTIES\n"
+              f'    IMPORTED_LOCATION "{sys.argv[1]}"\n'
+              ")"
+          )
+          if s.count(old) != 1:
+              raise SystemExit("STOP: expected font-generator target not found exactly once.")
+          p.write_text(s.replace(old, new, 1))
+          print("Configured native macOS font generator.")
+          PYTHON
+
       - name: Configure iOS ARM64
         working-directory: ShadiOS/upstream-shadPS4
         run: |
