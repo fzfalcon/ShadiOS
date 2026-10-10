@@ -38,13 +38,10 @@ jobs:
         working-directory: ShadiOS/upstream-shadPS4
         run: |
           set -u
-
           echo "=== libusb CMake iOS references ==="
           grep -n -A8 -B4 'iOS' externals/libusb/CMakeLists.txt || true
-
           echo "=== null_usb.c locations ==="
           find externals/libusb -name 'null_usb.c' -print || true
-
           echo "=== libusb OS source directory ==="
           ls -la externals/libusb/libusb/os || true
 
@@ -64,93 +61,28 @@ jobs:
         working-directory: ShadiOS/upstream-shadPS4
         run: |
           set -euo pipefail
-
           if [ ! -d externals/MoltenVK/.git ]; then
             rm -rf externals/MoltenVK
-            git clone https://github.com/shadPS4-emu/ext-MoltenVK.git \
-              externals/MoltenVK
+            git clone https://github.com/shadPS4-emu/ext-MoltenVK.git externals/MoltenVK
           fi
-
-          git -C externals/MoltenVK checkout \
-            a14cbf433414aa95da7046694b069f0f3f9263a5
-
+          git -C externals/MoltenVK checkout a14cbf433414aa95da7046694b069f0f3f9263a5
           test -f externals/MoltenVK/CMakeLists.txt
 
-      - name: Patch MoltenVK for iOS
+      - name: Inspect MoltenVK CMake
         working-directory: ShadiOS/upstream-shadPS4
         run: |
           set -euo pipefail
-
-          python3 - <<'PYTHON'
-          from pathlib import Path
-          import re
-
-          common_path = Path("externals/MoltenVK/Common/CMakeLists.txt")
-          common = common_path.read_text()
-
-          pattern = re.compile(
-              r'if \(CMAKE_SYSTEM_NAME STREQUAL "Darwin"\)\n'
-              r'[ \t]*find_library\(APPKIT_LIBRARY AppKit REQUIRED\)\n'
-              r'[ \t]*target_link_libraries\(MoltenVK_Common PUBLIC '
-              r'\$\{APPKIT_LIBRARY\}\)\n'
-              r'endif\(\)'
-          )
-
-          replacement = (
-              'if (CMAKE_SYSTEM_NAME STREQUAL "Darwin")\n'
-              '        find_library(APPKIT_LIBRARY AppKit REQUIRED)\n'
-              '        target_link_libraries(MoltenVK_Common PUBLIC ${APPKIT_LIBRARY})\n'
-              'elseif (CMAKE_SYSTEM_NAME STREQUAL "iOS")\n'
-              '        # AppKit is unavailable on iOS.\n'
-              'endif()'
-          )
-
-          if 'elseif (CMAKE_SYSTEM_NAME STREQUAL "iOS")' in common:
-              print("MoltenVK AppKit guard already present")
-          else:
-              updated, count = pattern.subn(replacement, common, count=1)
-              if count != 1:
-                  raise SystemExit(
-                      "ERROR: Expected MoltenVK Darwin/AppKit block not found"
-                  )
-              common_path.write_text(updated)
-              print("Applied MoltenVK AppKit guard")
-
-          root_path = Path("externals/MoltenVK/CMakeLists.txt")
-          root = root_path.read_text()
-          marker = 'add_subdirectory("MoltenVK")'
-
-          addition = '''add_subdirectory("MoltenVK")
-
-          if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
-              target_link_libraries(MoltenVK PRIVATE
-                  "-framework UIKit"
-                  "-framework CoreGraphics"
-              )
-          endif()'''
-
-          if "framework UIKit" in root:
-              print("MoltenVK iOS framework links already present")
-          elif marker in root:
-              root_path.write_text(root.replace(marker, addition, 1))
-              print("Added MoltenVK iOS framework links")
-          else:
-              raise SystemExit(
-                  "ERROR: MoltenVK target declaration not found"
-              )
-          PYTHON
-
-          grep -n -A5 -B2 'APPKIT_LIBRARY' \
-            externals/MoltenVK/Common/CMakeLists.txt
+          echo "=== Common CMake ==="
+          grep -n -A12 -B8 'APPKIT_LIBRARY\|find_library.*AppKit\|MoltenVK_Common' externals/MoltenVK/Common/CMakeLists.txt || true
+          echo "=== Root CMake ==="
+          grep -n -A8 -B5 'add_subdirectory.*MoltenVK\|MoltenVK' externals/MoltenVK/CMakeLists.txt | head -100
 
       - name: Configure iOS ARM64
         working-directory: ShadiOS/upstream-shadPS4
         run: |
           set -euo pipefail
-
           IOS_SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
           test -d "$IOS_SDK"
-
           cmake -S . -B build-shadios-ios -G Ninja \
             -DCMAKE_SYSTEM_NAME=iOS \
             -DCMAKE_OSX_SYSROOT="$IOS_SDK" \
@@ -163,27 +95,18 @@ jobs:
         working-directory: ShadiOS/upstream-shadPS4
         run: |
           set -euo pipefail
-          cmake --build build-shadios-ios \
-            --target shadps4 \
-            --parallel 3
+          cmake --build build-shadios-ios --target shadps4 --parallel 3
 
       - name: Package library
         working-directory: ShadiOS/upstream-shadPS4
         run: |
           set -euo pipefail
-
           mkdir -p ../shadios-artifact
-
-          find build-shadios-ios \
-            -type f \
-            -name 'libshadps4.a' \
+          find build-shadios-ios -type f -name 'libshadps4.a' \
             -exec cp {} ../shadios-artifact/ \;
-
           test -f ../shadios-artifact/libshadps4.a
           xcrun lipo -info ../shadios-artifact/libshadps4.a
-
-          cp build-shadios-ios/CMakeCache.txt \
-            ../shadios-artifact/
+          cp build-shadios-ios/CMakeCache.txt ../shadios-artifact/
 
       - name: Upload iOS ARM64 library
         uses: actions/upload-artifact@v4
