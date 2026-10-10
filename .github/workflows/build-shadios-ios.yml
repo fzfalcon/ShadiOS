@@ -70,59 +70,21 @@ jobs:
             a14cbf433414aa95da7046694b069f0f3f9263a5
           test -f externals/MoltenVK/CMakeLists.txt
 
-      - name: Patch MoltenVK for iOS
+            - name: Diagnose MoltenVK CMake
         working-directory: ShadiOS/upstream-shadPS4
         run: |
-          set -euo pipefail
-          python3 - <<'PYTHON'
-          from pathlib import Path
-          import re
+          set -u
 
-          path = Path("externals/MoltenVK/Common/CMakeLists.txt")
-          text = path.read_text()
+          echo "=== Common CMakeLists.txt ==="
+          nl -ba externals/MoltenVK/Common/CMakeLists.txt | head -100
 
-          if re.search(
-              r'elseif\s*\(\s*CMAKE_SYSTEM_NAME\s+STREQUAL\s+"iOS"\s*\)',
-              text,
-          ):
-              print("iOS AppKit guard already exists")
-          else:
-              pattern = re.compile(
-                  r'if\s*\(\s*CMAKE_SYSTEM_NAME\s+STREQUAL\s+"Darwin"\s*\)'
-                  r'(?:(?!endif\s*\(\s*\)).)*'
-                  r'endif\s*\(\s*\)',
-                  re.DOTALL,
-              )
-              match = pattern.search(text)
-              if not match:
-                  raise SystemExit(
-                      "ERROR: Darwin CMake block not found; refusing to modify MoltenVK"
-                  )
+          echo "=== All AppKit references ==="
+          grep -Rni -C 5 'AppKit\|APPKIT_LIBRARY' \
+            externals/MoltenVK --include='CMakeLists.txt' \
+            --include='*.cmake' || true
 
-              block = match.group(0)
-              if "APPKIT_LIBRARY" not in block:
-                  raise SystemExit(
-                      "ERROR: Darwin block has no APPKIT_LIBRARY reference"
-                  )
-
-              replacement = re.sub(
-                  r'endif\s*\(\s*\)\s*$',
-                  'elseif (CMAKE_SYSTEM_NAME STREQUAL "iOS")\n'
-                  '    # AppKit is unavailable on iOS.\n'
-                  'endif()',
-                  block,
-              )
-              path.write_text(
-                  text[:match.start()] + replacement + text[match.end():]
-              )
-              print("Applied iOS AppKit guard")
-
-          updated = path.read_text()
-          print("=== MoltenVK AppKit references ===")
-          for line_number, line in enumerate(updated.splitlines(), 1):
-              if "APPKIT_LIBRARY" in line or 'STREQUAL "iOS"' in line:
-                  print(f"{line_number}: {line}")
-          PYTHON
+          echo "=== Root CMakeLists.txt ==="
+          nl -ba externals/MoltenVK/CMakeLists.txt | head -120
 
       - name: Configure iOS ARM64
         working-directory: ShadiOS/upstream-shadPS4
