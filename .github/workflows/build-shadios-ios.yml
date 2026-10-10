@@ -42,7 +42,7 @@ jobs:
           grep -n -A8 -B4 'iOS' externals/libusb/CMakeLists.txt || true
           echo "=== null_usb.c locations ==="
           find externals/libusb -name 'null_usb.c' -print || true
-          echo "=== libusb OS source directory ==="
+          echo "=== libusb OS directory ==="
           ls -la externals/libusb/libusb/os || true
 
       - name: Verify iOS source
@@ -70,15 +70,14 @@ jobs:
             a14cbf433414aa95da7046694b069f0f3f9263a5
           test -f externals/MoltenVK/CMakeLists.txt
 
-            - name: Diagnose MoltenVK CMake
+      - name: Diagnose MoltenVK CMake
         working-directory: ShadiOS/upstream-shadPS4
         run: |
           set -u
-
           echo "=== Common CMakeLists.txt ==="
           nl -ba externals/MoltenVK/Common/CMakeLists.txt | head -100
 
-          echo "=== All AppKit references ==="
+          echo "=== AppKit references ==="
           grep -Rni -C 5 'AppKit\|APPKIT_LIBRARY' \
             externals/MoltenVK --include='CMakeLists.txt' \
             --include='*.cmake' || true
