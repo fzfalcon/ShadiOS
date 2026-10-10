@@ -125,6 +125,12 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DENABLE_TESTS=OFF
 
+      - name: Generate ImGui fonts first
+        working-directory: ShadiOS/upstream-shadPS4
+        run: |
+          set -euo pipefail
+          cmake --build build-shadios-ios --target ImGui_Resources --parallel 1
+
       - name: Build emulator library
         working-directory: ShadiOS/upstream-shadPS4
         run: |
