@@ -32,12 +32,53 @@ jobs:
           git apply --check ../shadios-ios-changes.patch
           git apply ../shadios-ios-changes.patch
 
+      - name: Patch ImGuiFileDialog for iOS
+        working-directory: ShadiOS/upstream-shadPS4
+        run: |
+          set -euo pipefail
+          python3 <<'PYTHON'
+          from pathlib import Path
+
+          p = Path("externals/ImGuiFileDialog/ImGuiFileDialog.cpp")
+          s = p.read_text()
+          start = s.index("    bool CreateDirectoryIfNotExist(")
+          end = s.index("    std::vector<std::string> GetDrivesList()", start)
+          function = s[start:end]
+
+          old = (
+              "#elif defined(_IGFD_UNIX_)\n"
+              "                char buffer[PATH_MAX] = {};"
+          )
+          new = (
+              "#elif defined(_IGFD_UNIX_)\n"
+              "#if defined(__ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__)\n"
+              "                namespace fs = std::filesystem;\n"
+              "                std::error_code ec;\n"
+              "                fs::create_directories(fs::path(vName), ec);\n"
+              "                res = !ec;\n"
+              "#else\n"
+              "                char buffer[PATH_MAX] = {};"
+          )
+          if function.count(old) != 1:
+              raise SystemExit("STOP: original directory-creation code not found exactly once.")
+
+          function = function.replace(old, new, 1)
+          marker = "#endif  // _IGFD_WIN_"
+          if function.count(marker) != 1:
+              raise SystemExit("STOP: expected preprocessor ending not found exactly once.")
+
+          function = function.replace(marker, "#endif\n#endif  // _IGFD_WIN_", 1)
+          p.write_text(s[:start] + function + s[end:])
+          print("Applied iOS-safe directory creation patch.")
+          PYTHON
+
       - name: Verify iOS source changes
         working-directory: ShadiOS/upstream-shadPS4
         run: |
           set -euo pipefail
           test -f src/platform/ios/shadps4_ios_api.cpp
           grep -n -A15 'if(CMAKE_SYSTEM_NAME STREQUAL "iOS")' CMakeLists.txt
+          grep -n -A18 'bool CreateDirectoryIfNotExist' externals/ImGuiFileDialog/ImGuiFileDialog.cpp
 
       - name: Install build tools
         run: |
@@ -67,9 +108,6 @@ jobs:
 
           common_path = Path("externals/MoltenVK/Common/CMakeLists.txt")
           lines = common_path.read_text().splitlines()
-
-          # This workflow builds iOS only. Remove AppKit discovery/link lines
-          # so the iOS SDK never attempts to locate the macOS-only framework.
           filtered = [
               line for line in lines
               if "APPKIT_LIBRARY" not in line and not re.search(r"\bAppKit\b", line)
@@ -102,12 +140,12 @@ jobs:
 
       - name: Diagnose Objective-C++ toolchain
         run: |
-         set -euo pipefail
-         xcrun --find clang
-         xcrun --find clang++
-         cmake --version
-         cmake --help-variable CMAKE_OBJCXX_COMPILE_OBJECT
-    
+          set -euo pipefail
+          xcrun --find clang
+          xcrun --find clang++
+          cmake --version
+          cmake --help-variable CMAKE_OBJCXX_COMPILE_OBJECT
+
       - name: Build native ImGui font generator
         working-directory: ShadiOS/upstream-shadPS4
         run: |
@@ -130,8 +168,18 @@ jobs:
           )
           if s.count(old) != 1:
               raise SystemExit("STOP: expected font-generator target not found exactly once.")
-          p.write_text(s.replace(old, new, 1))
-          print("Configured native macOS font generator.")
+
+          updated = s.replace(old, new, 1)
+          dependency = 'DEPENDS Dear_ImGui_FontEmbed "fonts/${FONT_FILE}"'
+          if updated.count(dependency) != 1:
+              raise SystemExit("STOP: expected dependency line not found.")
+          updated = updated.replace(
+              dependency,
+              'DEPENDS "fonts/${FONT_FILE}"',
+              1,
+          )
+          p.write_text(updated)
+          print("Native font-generator fix applied.")
           PYTHON
 
       - name: Configure iOS ARM64
