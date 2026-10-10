@@ -100,6 +100,14 @@ jobs:
           print("MoltenVK iOS patch completed.")
           PYTHON
 
+      - name: Diagnose Objective-C++ toolchain
+        run: |
+         set -euo pipefail
+         xcrun --find clang
+         xcrun --find clang++
+         cmake --version
+         cmake --help-variable CMAKE_OBJCXX_COMPILE_OBJECT
+    
       - name: Configure iOS ARM64
         working-directory: ShadiOS/upstream-shadPS4
         run: |
