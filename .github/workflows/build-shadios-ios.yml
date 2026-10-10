@@ -72,6 +72,30 @@ jobs:
           print("Applied iOS-safe directory creation patch.")
           PYTHON
 
+      - name: Disable libusb eventfd on iOS
+        working-directory: ShadiOS/upstream-shadPS4
+        run: |
+          set -euo pipefail
+          python3 <<'PYTHON'
+          from pathlib import Path
+
+          p = Path("externals/libusb/CMakeLists.txt")
+          s = p.read_text()
+          target = "    check_include_files(sys/eventfd.h    HAVE_EVENTFD)"
+          replacement = (
+              target + "\n"
+              "\n"
+              "    # iOS does not provide sys/eventfd.h; use libusb's pipe() fallback.\n"
+              "    if(CMAKE_SYSTEM_NAME STREQUAL \"iOS\")\n"
+              "        set(HAVE_EVENTFD FALSE)\n"
+              "    endif()"
+          )
+          if s.count(target) != 1:
+              raise SystemExit("STOP: expected libusb eventfd check not found exactly once.")
+          p.write_text(s.replace(target, replacement, 1))
+          print("Configured libusb to use pipe() on iOS.")
+          PYTHON
+
       - name: Verify iOS source changes
         working-directory: ShadiOS/upstream-shadPS4
         run: |
