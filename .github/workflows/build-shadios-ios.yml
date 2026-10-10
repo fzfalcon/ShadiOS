@@ -1,4 +1,3 @@
-
 name: Build ShadiOS iOS
 
 on:
@@ -7,66 +6,43 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: shadios-ios-build
-  cancel-in-progress: false
-
 jobs:
   build:
-    name: Build ShadiOS ARM64
     runs-on: macos-15
-    timeout-minutes: 360
+    timeout-minutes: 120
 
     steps:
       - name: Checkout ShadiOS
         uses: actions/checkout@v4
         with:
+          ref: main
           path: ShadiOS
-          persist-credentials: false
 
-      - name: Checkout shadPS4
+      - name: Checkout official shadPS4
         uses: actions/checkout@v4
         with:
           repository: shadps4-emu/shadPS4
           ref: c7e065d1b415be16c23e260a21f1dd8bbfc4cb57
           path: ShadiOS/upstream-shadPS4
           submodules: recursive
-          persist-credentials: false
 
       - name: Apply ShadiOS iOS patch
         working-directory: ShadiOS/upstream-shadPS4
-        shell: bash
         run: |
-          set -euo pipefail
           test -f ../shadios-ios-changes.patch
           git apply --check ../shadios-ios-changes.patch
           git apply ../shadios-ios-changes.patch
 
-      - name: Install build tools
-        run: brew install cmake ninja pkg-config
-
-      - name: Fetch MoltenVK
-        working-directory: ShadiOS/upstream-shadPS4
-        shell: bash
-        run: |
-          set -euo pipefail
-          git clone https://github.com/shadPS4-emu/ext-MoltenVK.git externals/MoltenVK
-          git -C externals/MoltenVK checkout a14cbf433414aa95da7046694b069f0f3f9263a5
-          git -C externals/MoltenVK submodule update --init --recursive
-
       - name: Patch libusb for iOS
         working-directory: ShadiOS/upstream-shadPS4
-        shell: bash
         run: |
-          set -euo pipefail
-
-          python3 - <<'PY'
+          python3 - <<'PYTHON'
           from pathlib import Path
 
-          path = Path("externals/libusb/CMakeLists.txt")
-          text = path.read_text()
+          p = Path("externals/libusb/CMakeLists.txt")
+          s = p.read_text()
 
-          old = """    elseif(APPLE)
+          old = '''    elseif(APPLE)
               target_sources(usb-1.0 PRIVATE
                   "${LIBUSB_ROOT}/os/darwin_usb.c"
                   "${LIBUSB_ROOT}/os/darwin_usb.h"
@@ -75,13 +51,12 @@ jobs:
                   "-framework Foundation"
                   "-framework IOKit"
                   "-framework Security"
-              )
-          """
+              )'''
 
-          new = """    elseif(CMAKE_SYSTEM_NAME STREQUAL "iOS")
-              # iOS does not support libusb's macOS IOKit USB backend.
-              # Keep common libusb sources so the target can be linked.
-              target_compile_definitions(usb-1.0 PRIVATE SHADIOS_IOS_NO_USB_BACKEND=1)
+          new = '''    elseif(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+              target_sources(usb-1.0 PRIVATE
+                  "${LIBUSB_ROOT}/os/null_usb.c"
+              )
           elseif(APPLE)
               target_sources(usb-1.0 PRIVATE
                   "${LIBUSB_ROOT}/os/darwin_usb.c"
@@ -91,272 +66,130 @@ jobs:
                   "-framework Foundation"
                   "-framework IOKit"
                   "-framework Security"
-              )
-          """
+              )'''
 
-          if "SHADIOS_IOS_NO_USB_BACKEND" in text:
-              print("libusb iOS CMake patch already applied.")
-          elif old in text:
-              path.write_text(text.replace(old, new, 1))
-              print("libusb CMake platform selection patched.")
+          if new in s:
+              print("iOS libusb patch already applied")
+          elif old in s:
+              p.write_text(s.replace(old, new, 1))
+              print("Applied iOS libusb patch")
           else:
               raise SystemExit(
-                  "Could not find expected APPLE backend block in libusb CMakeLists.txt."
+                  "ERROR: Expected libusb platform block not found"
               )
-          PY
+          PYTHON
 
-      - name: Add minimal libusb iOS backend
+      - name: Verify iOS source and USB patch
         working-directory: ShadiOS/upstream-shadPS4
-        shell: bash
         run: |
-          set -euo pipefail
+          test -f src/platform/ios/shadps4_ios_api.cpp
+          grep -n -A 15 'STREQUAL "iOS"' externals/libusb/CMakeLists.txt
+          grep -n -A 15 'if(CMAKE_SYSTEM_NAME STREQUAL "iOS")' CMakeLists.txt
 
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
+      - name: Install build tools
+        run: |
+          brew install cmake ninja pkg-config
 
-          root = Path("externals/libusb/libusb")
-          internal = root / "libusbi.h"
-          if not internal.exists():
-              raise SystemExit(f"Missing libusb internal header: {internal}")
-
-          # This source is intentionally only a placeholder. Do not pretend
-          # USB device enumeration is implemented on iOS.
-          stub = root / "os/shadios_ios_usb.c"
-          stub.write_text(r'''
-          /*
-           * ShadiOS experimental iOS libusb backend.
-           * Physical USB enumeration is not implemented here.
-           */
-          #include "libusbi.h"
-
-          const struct usbi_os_backend usbi_backend = {
-              .name = "shadios-ios-no-usb",
-          };
-          ''')
-
-          cmake = Path("externals/libusb/CMakeLists.txt")
-          text = cmake.read_text()
-
-          marker = "SHADIOS_IOS_STUB_SOURCE"
-          if marker not in text:
-              pattern = re.compile(
-                  r'(elseif\(CMAKE_SYSTEM_NAME STREQUAL "iOS"\)\s*\n'
-                  r'.*?SHADIOS_IOS_NO_USB_BACKEND=1\)\s*)',
-                  re.DOTALL,
-              )
-              match = pattern.search(text)
-              if not match:
-                  raise SystemExit("Could not locate the iOS libusb CMake branch.")
-
-              insertion = match.group(1) + f'''
-              # {marker}
-              target_sources(usb-1.0 PRIVATE
-                  "${{LIBUSB_ROOT}}/os/shadios_ios_usb.c"
-              )
-          '''
-              text = text[:match.start()] + insertion + text[match.end():]
-              cmake.write_text(text)
-
-          print("Added experimental iOS USB backend stub.")
-          PY
-
-      - name: Patch MoltenVK platform frameworks
+      - name: Fetch MoltenVK dependency
         working-directory: ShadiOS/upstream-shadPS4
-        shell: bash
         run: |
-          set -euo pipefail
-          python3 - <<'PY'
+          git clone https://github.com/shadPS4-emu/ext-MoltenVK.git externals/MoltenVK
+          git -C externals/MoltenVK checkout a14cbf433414aa95da7046694b069f0f3f9263a5
+          test -f externals/MoltenVK/CMakeLists.txt
+
+      - name: Patch MoltenVK for iOS
+        working-directory: ShadiOS/upstream-shadPS4
+        run: |
+          python3 - <<'PYTHON'
           from pathlib import Path
-          import re
 
-          common = Path("externals/MoltenVK/Common/CMakeLists.txt")
-          text = common.read_text()
-          text = re.sub(
-              r'^[ \t]*find_library\((?:APPKIT|IOKIT)_LIBRARY[^\n]*\n',
-              '',
-              text,
-              flags=re.MULTILINE,
-          )
-          text = re.sub(
-              r'^[ \t]*target_link_libraries\(MoltenVK_Common PUBLIC \$\{(?:APPKIT|IOKIT)_LIBRARY\}\)[^\n]*\n',
-              '',
-              text,
-              flags=re.MULTILINE,
-          )
+          p = Path("externals/MoltenVK/Common/CMakeLists.txt")
+          s = p.read_text()
 
-          if "SHADIOS_PLATFORM_FRAMEWORKS" not in text:
-              text += """
-          # SHADIOS_PLATFORM_FRAMEWORKS
-          if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
-              find_library(APPKIT_LIBRARY AppKit REQUIRED)
-              find_library(IOKIT_LIBRARY IOKit REQUIRED)
-              target_link_libraries(MoltenVK_Common PUBLIC
-                  ${APPKIT_LIBRARY}
-                  ${IOKIT_LIBRARY}
+          old = '''        find_library(APPKIT_LIBRARY AppKit REQUIRED)
+          target_link_libraries(MoltenVK_Common PUBLIC ${APPKIT_LIBRARY})'''
+
+          new = '''        if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+            find_library(APPKIT_LIBRARY AppKit REQUIRED)
+            target_link_libraries(MoltenVK_Common PUBLIC ${APPKIT_LIBRARY})
+          endif()'''
+
+          if new in s:
+              print("MoltenVK AppKit guard already present")
+          elif old in s:
+              p.write_text(s.replace(old, new, 1))
+              print("Patched MoltenVK AppKit guard")
+          else:
+              raise SystemExit(
+                  "ERROR: Expected AppKit block not found"
               )
-          endif()
-          """
-          common.write_text(text)
 
-          root = Path("externals/MoltenVK/CMakeLists.txt")
-          text = root.read_text()
+          p = Path("externals/MoltenVK/CMakeLists.txt")
+          s = p.read_text()
+
           marker = 'add_subdirectory("MoltenVK")'
-
-          if "SHADIOS_IOS_FRAMEWORKS" not in text:
-              if marker not in text:
-                  raise SystemExit(f"Could not find {marker} in {root}")
-
-              text = text.replace(
-                  marker,
-                  marker + """
-          
-          # SHADIOS_IOS_FRAMEWORKS
+          addition = '''
           if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
-              find_library(UIKIT_FRAMEWORK UIKit REQUIRED)
-              find_library(COREGRAPHICS_FRAMEWORK CoreGraphics REQUIRED)
-              target_link_libraries(MoltenVK PUBLIC
-                  ${UIKIT_FRAMEWORK}
-                  ${COREGRAPHICS_FRAMEWORK}
-              )
-          endif()
-          """,
-                  1,
-              )
-          root.write_text(text)
-          PY
+              target_link_libraries(MoltenVK PRIVATE "-framework UIKit" "-framework CoreGraphics")
+          endif()'''
 
-      - name: Build native font generator
-        working-directory: ShadiOS/upstream-shadPS4
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p host-tools
-          clang++ -std=c++17 \
-            externals/imgui/misc/fonts/binary_to_compressed_c.cpp \
-            -o host-tools/Dear_ImGui_FontEmbed
+          if "framework UIKit" not in s:
+              if marker not in s:
+                  raise SystemExit(
+                      "ERROR: MoltenVK target declaration not found"
+                  )
+              p.write_text(s.replace(marker, marker + addition, 1))
+              print("Added iOS framework links")
+          else:
+              print("iOS framework links already present")
+          PYTHON
 
-      - name: Configure host font generator
-        working-directory: ShadiOS/upstream-shadPS4
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
-
-          path = Path("src/imgui/renderer/CMakeLists.txt")
-          text = path.read_text()
-
-          if "HOST_FONT_EMBED_EXECUTABLE" in text:
-              print("Font generator patch already present.")
-              raise SystemExit(0)
-
-          pattern = re.compile(
-              r'add_executable\(Dear_ImGui_FontEmbed\s+'
-              r'\$\{CMAKE_SOURCE_DIR\}/externals/imgui/misc/fonts/'
-              r'binary_to_compressed_c\.cpp\)'
-          )
-          replacement = """if(CMAKE_CROSSCOMPILING AND HOST_FONT_EMBED_EXECUTABLE)
-              add_executable(Dear_ImGui_FontEmbed IMPORTED GLOBAL)
-              set_target_properties(Dear_ImGui_FontEmbed PROPERTIES
-                  IMPORTED_LOCATION "${HOST_FONT_EMBED_EXECUTABLE}")
-          else()
-              add_executable(Dear_ImGui_FontEmbed
-                  ${CMAKE_SOURCE_DIR}/externals/imgui/misc/fonts/binary_to_compressed_c.cpp)
-          endif()"""
-
-          text, count = pattern.subn(replacement, text, count=1)
-          if count != 1:
-              raise SystemExit("Could not find expected font generator target.")
-
-          text, count = re.subn(
-              r'COMMAND\s+\$<TARGET_FILE:Dear_ImGui_FontEmbed>',
-              'COMMAND ${HOST_FONT_EMBED_EXECUTABLE}',
-              text,
-              count=1,
-          )
-          if count != 1:
-              raise SystemExit("Could not find expected font generator COMMAND.")
-
-          path.write_text(text)
-          PY
-
-      - name: Enable Objective-C languages
-        working-directory: ShadiOS/upstream-shadPS4
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
-
-          path = Path("CMakeLists.txt")
-          text = path.read_text()
-
-          if "enable_language(OBJCXX)" in text:
-              raise SystemExit(0)
-
-          match = re.search(r'\bproject\s*\([^)]*\)', text, re.IGNORECASE)
-          if not match:
-              raise SystemExit("Could not locate project() in root CMakeLists.txt.")
-
-          block = match.group(0) + """
-
-          if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
-              enable_language(OBJC)
-              enable_language(OBJCXX)
-          endif()
-          """
-          path.write_text(text[:match.start()] + block + text[match.end():])
-          PY
+          grep -n -C 2 APPKIT_LIBRARY externals/MoltenVK/Common/CMakeLists.txt
 
       - name: Configure iOS ARM64
         working-directory: ShadiOS/upstream-shadPS4
-        shell: bash
         run: |
-          set -euo pipefail
+          IOS_SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          test -d "$IOS_SDK"
+
           cmake -S . -B build-shadios-ios -G Ninja \
             -DCMAKE_SYSTEM_NAME=iOS \
-            -DCMAKE_OSX_SYSROOT=iphoneos \
+            -DCMAKE_OSX_SYSROOT="$IOS_SDK" \
             -DCMAKE_OSX_ARCHITECTURES=arm64 \
             -DCMAKE_OSX_DEPLOYMENT_TARGET=17.0 \
             -DCMAKE_BUILD_TYPE=Release \
-            -DENABLE_TESTS=OFF \
-            -DLIBUSB_BUILD_TESTING=OFF \
-            -DLIBUSB_BUILD_EXAMPLES=OFF \
-            -DALLOWS_ONESHOT_TIMERS_WITH_TIMEOUT_ZERO_EXITCODE=0 \
-            -DHOST_FONT_EMBED_EXECUTABLE="${PWD}/host-tools/Dear_ImGui_FontEmbed"
+            -DENABLE_TESTS=OFF
 
       - name: Build emulator library
         working-directory: ShadiOS/upstream-shadPS4
-        shell: bash
         run: |
-          set -euo pipefail
-          cmake --build build-shadios-ios --target shadps4 --parallel 1
+          cmake --build build-shadios-ios \
+            --target shadps4 \
+            --parallel 3
 
-      - name: Collect static libraries
-        if: success()
+      - name: Package library
         working-directory: ShadiOS/upstream-shadPS4
-        shell: bash
         run: |
-          set -euo pipefail
-          mkdir -p ../artifacts
-          find build-shadios-ios -type f -name '*.a' -exec cp {} ../artifacts/ \;
-          test -n "$(find ../artifacts -type f -name '*.a' -print -quit)" \
-            || { echo "No static libraries found."; exit 1; }
-          ditto -c -k --sequesterRsrc ../artifacts ../ShadiOS-static-libraries.zip
+          mkdir -p ../shadios-artifact
 
-      - name: Upload iOS ARM64 artifact
-        if: success()
+          find build-shadios-ios \
+            -type f \
+            -name 'libshadps4.a' \
+            -exec cp {} ../shadios-artifact/ \;
+
+          test -f ../shadios-artifact/libshadps4.a
+
+          xcrun lipo -info ../shadios-artifact/libshadps4.a
+
+          cp build-shadios-ios/CMakeCache.txt \
+            ../shadios-artifact/
+
+      - name: Upload iOS ARM64 library
         uses: actions/upload-artifact@v4
         with:
-          name: ShadiOS-iOS-ARM64
-          path: |
-            ShadiOS/artifacts/
-            ShadiOS/ShadiOS-static-libraries.zip
+          name: ShadiOS-iOS-arm64-library
+          path: ShadiOS/shadios-artifact/
           if-no-files-found: error
-          compression-level: 1
 
       - name: Upload build diagnostics
         if: always()
@@ -364,7 +197,6 @@ jobs:
         with:
           name: ShadiOS-build-diagnostics
           path: |
-            ShadiOS/upstream-shadPS4/build-shadios-ios/CMakeCache.txt
             ShadiOS/upstream-shadPS4/build-shadios-ios/CMakeFiles/CMakeConfigureLog.yaml
-            ShadiOS/upstream-shadPS4/build-shadios-ios/CMakeFiles/CMakeOutput.log
+            ShadiOS/upstream-shadPS4/build-shadios-ios/CMakeCache.txt
           if-no-files-found: ignore
