@@ -29,6 +29,7 @@ jobs:
       - name: Apply ShadiOS iOS patch
         working-directory: ShadiOS/upstream-shadPS4
         run: |
+          set -euo pipefail
           test -f ../shadios-ios-changes.patch
           git apply --check ../shadios-ios-changes.patch
           git apply ../shadios-ios-changes.patch
@@ -36,119 +37,148 @@ jobs:
       - name: Patch libusb for iOS
         working-directory: ShadiOS/upstream-shadPS4
         run: |
+          set -euo pipefail
+
           python3 - <<'PYTHON'
           from pathlib import Path
 
-          p = Path("externals/libusb/CMakeLists.txt")
-          s = p.read_text()
+          path = Path("externals/libusb/CMakeLists.txt")
+          source = path.read_text()
 
-          old = '''    elseif(APPLE)
-              target_sources(usb-1.0 PRIVATE
-                  "${LIBUSB_ROOT}/os/darwin_usb.c"
-                  "${LIBUSB_ROOT}/os/darwin_usb.h"
-              )
-              target_link_libraries(usb-1.0 PRIVATE
-                  "-framework Foundation"
-                  "-framework IOKit"
-                  "-framework Security"
-              )'''
+          old = "\n".join([
+              "    elseif(APPLE)",
+              "        target_sources(usb-1.0 PRIVATE",
+              '            "${LIBUSB_ROOT}/os/darwin_usb.c"',
+              '            "${LIBUSB_ROOT}/os/darwin_usb.h"',
+              "        )",
+              "        target_link_libraries(usb-1.0 PRIVATE",
+              '            "-framework Foundation"',
+              '            "-framework IOKit"',
+              '            "-framework Security"',
+              "        )",
+          ])
 
-          new = '''    elseif(CMAKE_SYSTEM_NAME STREQUAL "iOS")
-              target_sources(usb-1.0 PRIVATE
-                  "${LIBUSB_ROOT}/os/null_usb.c"
-              )
-          elseif(APPLE)
-              target_sources(usb-1.0 PRIVATE
-                  "${LIBUSB_ROOT}/os/darwin_usb.c"
-                  "${LIBUSB_ROOT}/os/darwin_usb.h"
-              )
-              target_link_libraries(usb-1.0 PRIVATE
-                  "-framework Foundation"
-                  "-framework IOKit"
-                  "-framework Security"
-              )'''
+          new = "\n".join([
+              '    elseif(CMAKE_SYSTEM_NAME STREQUAL "iOS")',
+              "        target_sources(usb-1.0 PRIVATE",
+              '            "${LIBUSB_ROOT}/os/null_usb.c"',
+              "        )",
+              "    elseif(APPLE)",
+              "        target_sources(usb-1.0 PRIVATE",
+              '            "${LIBUSB_ROOT}/os/darwin_usb.c"',
+              '            "${LIBUSB_ROOT}/os/darwin_usb.h"',
+              "        )",
+              "        target_link_libraries(usb-1.0 PRIVATE",
+              '            "-framework Foundation"',
+              '            "-framework IOKit"',
+              '            "-framework Security"',
+              "        )",
+          ])
 
-          if new in s:
-              print("iOS libusb patch already applied")
-          elif old in s:
-              p.write_text(s.replace(old, new, 1))
+          if new in source:
+              print("iOS libusb patch already present")
+          elif old in source:
+              path.write_text(source.replace(old, new, 1))
               print("Applied iOS libusb patch")
           else:
               raise SystemExit(
-                  "ERROR: Expected libusb platform block not found"
+                  "ERROR: Expected libusb CMake block not found. "
+                  "No changes were made."
               )
           PYTHON
 
-      - name: Verify iOS source and USB patch
+      - name: Verify iOS source
         working-directory: ShadiOS/upstream-shadPS4
         run: |
+          set -euo pipefail
           test -f src/platform/ios/shadps4_ios_api.cpp
-          grep -n -A 15 'STREQUAL "iOS"' externals/libusb/CMakeLists.txt
-          grep -n -A 15 'if(CMAKE_SYSTEM_NAME STREQUAL "iOS")' CMakeLists.txt
+          grep -n -A15 'if(CMAKE_SYSTEM_NAME STREQUAL "iOS")' CMakeLists.txt
 
       - name: Install build tools
         run: |
+          set -euo pipefail
           brew install cmake ninja pkg-config
 
       - name: Fetch MoltenVK dependency
         working-directory: ShadiOS/upstream-shadPS4
         run: |
-          git clone https://github.com/shadPS4-emu/ext-MoltenVK.git externals/MoltenVK
-          git -C externals/MoltenVK checkout a14cbf433414aa95da7046694b069f0f3f9263a5
+          set -euo pipefail
+
+          if [ ! -d externals/MoltenVK/.git ]; then
+            git clone https://github.com/shadPS4-emu/ext-MoltenVK.git \
+              externals/MoltenVK
+          fi
+
+          git -C externals/MoltenVK checkout \
+            a14cbf433414aa95da7046694b069f0f3f9263a5
+
           test -f externals/MoltenVK/CMakeLists.txt
 
       - name: Patch MoltenVK for iOS
         working-directory: ShadiOS/upstream-shadPS4
         run: |
+          set -euo pipefail
+
           python3 - <<'PYTHON'
           from pathlib import Path
 
-          p = Path("externals/MoltenVK/Common/CMakeLists.txt")
-          s = p.read_text()
+          common_path = Path("externals/MoltenVK/Common/CMakeLists.txt")
+          common = common_path.read_text()
 
-          old = '''        find_library(APPKIT_LIBRARY AppKit REQUIRED)
-          target_link_libraries(MoltenVK_Common PUBLIC ${APPKIT_LIBRARY})'''
+          old = "\n".join([
+              "        find_library(APPKIT_LIBRARY AppKit REQUIRED)",
+              "        target_link_libraries(MoltenVK_Common PUBLIC ${APPKIT_LIBRARY})",
+          ])
 
-          new = '''        if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
-            find_library(APPKIT_LIBRARY AppKit REQUIRED)
-            target_link_libraries(MoltenVK_Common PUBLIC ${APPKIT_LIBRARY})
-          endif()'''
+          new = "\n".join([
+              '        if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")',
+              "            find_library(APPKIT_LIBRARY AppKit REQUIRED)",
+              "            target_link_libraries(MoltenVK_Common PUBLIC ${APPKIT_LIBRARY})",
+              "        endif()",
+          ])
 
-          if new in s:
-              print("MoltenVK AppKit guard already present")
-          elif old in s:
-              p.write_text(s.replace(old, new, 1))
-              print("Patched MoltenVK AppKit guard")
+          if new in common:
+              print("MoltenVK AppKit patch already present")
+          elif old in common:
+              common_path.write_text(common.replace(old, new, 1))
+              print("Applied MoltenVK AppKit patch")
           else:
               raise SystemExit(
-                  "ERROR: Expected AppKit block not found"
+                  "ERROR: Expected AppKit block not found in "
+                  "MoltenVK/Common/CMakeLists.txt"
               )
 
-          p = Path("externals/MoltenVK/CMakeLists.txt")
-          s = p.read_text()
-
+          molten_path = Path("externals/MoltenVK/CMakeLists.txt")
+          molten = molten_path.read_text()
           marker = 'add_subdirectory("MoltenVK")'
-          addition = '''
-          if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
-              target_link_libraries(MoltenVK PRIVATE "-framework UIKit" "-framework CoreGraphics")
-          endif()'''
+          addition = (
+              'if(CMAKE_SYSTEM_NAME STREQUAL "iOS")\n'
+              '    target_link_libraries(MoltenVK PRIVATE '
+              '"-framework UIKit" "-framework CoreGraphics")\n'
+              'endif()'
+          )
 
-          if "framework UIKit" not in s:
-              if marker not in s:
-                  raise SystemExit(
-                      "ERROR: MoltenVK target declaration not found"
-                  )
-              p.write_text(s.replace(marker, marker + addition, 1))
-              print("Added iOS framework links")
+          if "framework UIKit" in molten:
+              print("MoltenVK iOS framework patch already present")
+          elif marker in molten:
+              molten_path.write_text(
+                  molten.replace(marker, marker + "\n" + addition, 1)
+              )
+              print("Applied MoltenVK iOS framework patch")
           else:
-              print("iOS framework links already present")
+              raise SystemExit(
+                  "ERROR: MoltenVK target declaration not found"
+              )
           PYTHON
 
-          grep -n -C 2 APPKIT_LIBRARY externals/MoltenVK/Common/CMakeLists.txt
+          grep -n -C 3 APPKIT_LIBRARY \
+            externals/MoltenVK/Common/CMakeLists.txt
 
       - name: Configure iOS ARM64
         working-directory: ShadiOS/upstream-shadPS4
         run: |
+          set -euo pipefail
+
           IOS_SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
           test -d "$IOS_SDK"
 
@@ -163,6 +193,7 @@ jobs:
       - name: Build emulator library
         working-directory: ShadiOS/upstream-shadPS4
         run: |
+          set -euo pipefail
           cmake --build build-shadios-ios \
             --target shadps4 \
             --parallel 3
@@ -170,6 +201,8 @@ jobs:
       - name: Package library
         working-directory: ShadiOS/upstream-shadPS4
         run: |
+          set -euo pipefail
+
           mkdir -p ../shadios-artifact
 
           find build-shadios-ios \
