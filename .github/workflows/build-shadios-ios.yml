@@ -65,42 +65,39 @@ jobs:
           import re
 
           common_path = Path("externals/MoltenVK/Common/CMakeLists.txt")
-          common = common_path.read_text()
-          pattern = re.compile(
-              r'if\s*\(CMAKE_SYSTEM_NAME STREQUAL "Darwin"\)\s*'
-              r'find_library\(APPKIT_LIBRARY AppKit REQUIRED\)\s*'
-              r'target_link_libraries\(MoltenVK_Common PUBLIC \$\{APPKIT_LIBRARY\}\)\s*'
-              r'endif\s*\(\s*\)',
-              re.MULTILINE
-          )
-          if 'find_library(APPKIT_LIBRARY AppKit REQUIRED)' in common:
-              if not pattern.search(common):
-                  raise SystemExit("ERROR: AppKit block did not match expected Darwin-only block")
-              replacement = (
-                  'if (CMAKE_SYSTEM_NAME STREQUAL "Darwin")\n'
-                  '        find_library(APPKIT_LIBRARY AppKit REQUIRED)\n'
-                  '        target_link_libraries(MoltenVK_Common PUBLIC ${APPKIT_LIBRARY})\n'
-                  'endif()'
-              )
-              common_path.write_text(pattern.sub(replacement, common, count=1))
+          lines = common_path.read_text().splitlines()
+
+          # This workflow builds iOS only. Remove AppKit discovery/link lines
+          # so the iOS SDK never attempts to locate the macOS-only framework.
+          filtered = [
+              line for line in lines
+              if "APPKIT_LIBRARY" not in line and not re.search(r"\bAppKit\b", line)
+          ]
+          common_path.write_text("\n".join(filtered) + "\n")
 
           root_path = Path("externals/MoltenVK/CMakeLists.txt")
           root = root_path.read_text()
           marker = 'add_subdirectory("MoltenVK")'
-          if "framework UIKit" not in root and marker in root:
-              addition = (
-                  'add_subdirectory("MoltenVK")\n\n'
-                  'if(CMAKE_SYSTEM_NAME STREQUAL "iOS")\n'
-                  '    target_link_libraries(MoltenVK PRIVATE\n'
-                  '        "-framework UIKit"\n'
-                  '        "-framework CoreGraphics"\n'
-                  '    )\n'
-                  'endif()'
-              )
-              root_path.write_text(root.replace(marker, addition, 1))
-          print("MoltenVK iOS patch step completed.")
+          if "framework UIKit" not in root:
+              if marker in root:
+                  addition = (
+                      'add_subdirectory("MoltenVK")\n\n'
+                      'if(CMAKE_SYSTEM_NAME STREQUAL "iOS")\n'
+                      '    target_link_libraries(MoltenVK PRIVATE\n'
+                      '        "-framework UIKit"\n'
+                      '        "-framework CoreGraphics"\n'
+                      '    )\n'
+                      'endif()'
+                  )
+                  root_path.write_text(root.replace(marker, addition, 1))
+              else:
+                  print("WARNING: MoltenVK subdirectory marker not found; skipped framework-link addition")
+
+          remaining = common_path.read_text()
+          if "APPKIT_LIBRARY" in remaining or re.search(r"\bAppKit\b", remaining):
+              raise SystemExit("ERROR: AppKit reference remains in iOS Common CMake file")
+          print("MoltenVK iOS patch completed.")
           PYTHON
-          grep -n -A4 -B2 'APPKIT_LIBRARY' externals/MoltenVK/Common/CMakeLists.txt || true
 
       - name: Configure iOS ARM64
         working-directory: ShadiOS/upstream-shadPS4
